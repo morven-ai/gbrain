@@ -29,6 +29,10 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   configureGateway,
   resetGateway,
@@ -42,6 +46,22 @@ import {
 import { AIConfigError, AITransientError } from '../../src/core/ai/errors.ts';
 import { __setTestRecipesForTests } from '../../src/core/ai/recipes/index.ts';
 import type { Recipe } from '../../src/core/ai/types.ts';
+import { embedBatch } from '../../src/core/embedding.ts';
+import {
+  _setRateLimitFloorsForTests,
+  embedBatchWithBackoff,
+} from '../../src/core/embed-retry.ts';
+import { __embedPageTextsForTests } from '../../src/commands/embed.ts';
+import {
+  REQUIRED_EMBED_ALLOWLIST_ENV,
+  createRequiredMigrationEmbedPairs,
+  loadRequiredMigrationEmbedAllowlistFromEnv,
+  runWithRequiredMigrationEmbedAllowlist,
+  runWithRequiredMigrationEmbedPairs,
+  type RequiredMigrationEmbedAllowlistEntry,
+  type RequiredMigrationEmbedAllowlistRun,
+} from '../../src/core/required-migration-embed-allowlist.ts';
+import type { StaleChunkRow } from '../../src/core/types.ts';
 
 // The last test in this file leaves the gateway configured with a remote
 // provider + fake key and a REAL embed transport. Without a final reset,
@@ -487,5 +507,273 @@ describe('startup warning for recipes missing max_batch_tokens', () => {
     expect(warnings.find(w => w.includes('"openai"'))).toBeUndefined();
     expect(warnings.find(w => w.includes('"google"'))).toBeUndefined();
     expect(warnings.find(w => w.includes('"synthetic-capless"'))).toBeDefined();
+  });
+});
+
+// --------- 8. REQUIRED migration provider-boundary allowlist ---------
+
+function digest(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function staleRows(texts: readonly string[]): StaleChunkRow[] {
+  return texts.map((text, index) => ({
+    slug: 'wiki/required-example',
+    chunk_index: index,
+    chunk_text: text,
+    chunk_source: 'compiled_truth',
+    model: null,
+    token_count: null,
+    source_id: 'required-source',
+    page_id: 1001,
+  }));
+}
+
+function allowlistEntries(
+  rows: readonly StaleChunkRow[],
+  providerTexts: readonly string[],
+): RequiredMigrationEmbedAllowlistEntry[] {
+  return rows.map((row, index) => ({
+    identity: {
+      source_id: row.source_id,
+      slug: row.slug,
+      chunk_source: row.chunk_source,
+      chunk_index: row.chunk_index,
+    },
+    stored_text_sha256: digest(row.chunk_text),
+    provider_text_sha256: digest(providerTexts[index]),
+    provider_text_chars: providerTexts[index].length,
+    provider_text_bytes: Buffer.byteLength(providerTexts[index], 'utf8'),
+  }));
+}
+
+function loadAllowlist(entries: readonly RequiredMigrationEmbedAllowlistEntry[]): {
+  run: RequiredMigrationEmbedAllowlistRun;
+  cleanup: () => void;
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-required-allowlist-'));
+  const path = join(dir, 'allowlist.json');
+  const raw = JSON.stringify({ version: 1, entries });
+  writeFileSync(path, raw, { mode: 0o600 });
+  try {
+    const run = loadRequiredMigrationEmbedAllowlistFromEnv({
+      [REQUIRED_EMBED_ALLOWLIST_ENV.mode]: 'REQUIRED',
+      [REQUIRED_EMBED_ALLOWLIST_ENV.path]: path,
+      [REQUIRED_EMBED_ALLOWLIST_ENV.sha256]: digest(raw),
+    });
+    if (!run) throw new Error('required allowlist fixture did not load');
+    return { run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function withRequiredPairs<T>(
+  rows: readonly StaleChunkRow[],
+  pairTexts: readonly string[],
+  entries: readonly RequiredMigrationEmbedAllowlistEntry[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const fixture = loadAllowlist(entries);
+  try {
+    return await runWithRequiredMigrationEmbedAllowlist(fixture.run, async () => {
+      const pairs = createRequiredMigrationEmbedPairs(rows, pairTexts);
+      return runWithRequiredMigrationEmbedPairs(pairs, fn);
+    });
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+describe('REQUIRED migration immutable text/identity pairs', () => {
+  beforeEach(() => {
+    resetGateway();
+    configureVoyage();
+  });
+
+  afterEach(() => {
+    _setRateLimitFloorsForTests(null);
+    __setEmbedTransportForTests(null);
+  });
+
+  test('pins the artifact bytes and rejects a manifest hash mismatch before transport', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-required-allowlist-bad-'));
+    const path = join(dir, 'allowlist.json');
+    const raw = JSON.stringify({ version: 1, entries: [] });
+    writeFileSync(path, raw, { mode: 0o600 });
+    try {
+      expect(() => loadRequiredMigrationEmbedAllowlistFromEnv({
+        [REQUIRED_EMBED_ALLOWLIST_ENV.mode]: 'REQUIRED',
+        [REQUIRED_EMBED_ALLOWLIST_ENV.path]: path,
+        [REQUIRED_EMBED_ALLOWLIST_ENV.sha256]: '0'.repeat(64),
+      })).toThrow('manifest fault');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('accepts fenced_code manifest entries and reaches transport', async () => {
+    const text = 'const answer = 42;';
+    const rows = staleRows([text]).map((row) => ({
+      ...row,
+      chunk_source: 'fenced_code',
+    })) as unknown as StaleChunkRow[];
+    const transport = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 1024));
+    __setEmbedTransportForTests(transport as any);
+
+    const result = await withRequiredPairs(rows, [text], allowlistEntries(rows, [text]),
+      () => embedBatch([text], { maxRetries: 0 }));
+
+    expect(result).toHaveLength(1);
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect((transport.mock.calls[0][0] as { values: string[] }).values).toEqual([text]);
+  });
+
+  test('rejects unsupported chunk_source as a manifest fault before transport', () => {
+    const text = 'unsupported-source-payload';
+    const rows = staleRows([text]);
+    const [valid] = allowlistEntries(rows, [text]);
+    const entries = [{
+      ...valid,
+      identity: { ...valid.identity, chunk_source: 'unsupported_source' },
+    }] as unknown as RequiredMigrationEmbedAllowlistEntry[];
+    const transport = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 1024));
+    __setEmbedTransportForTests(transport as any);
+
+    expect(() => loadAllowlist(entries)).toThrow('manifest fault');
+    expect(transport).toHaveBeenCalledTimes(0);
+  });
+
+  test('context/hash/char/byte/missing/extra/duplicate/identity/truncation faults make zero transport calls', async () => {
+    const transport = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 1024));
+    __setEmbedTransportForTests(transport as any);
+
+    const baseText = 'sensitive-payload-never-log';
+    const rows = staleRows([baseText]);
+    const valid = allowlistEntries(rows, [baseText]);
+    const cases: Array<() => Promise<unknown>> = [
+      async () => {
+        const fixture = loadAllowlist(valid);
+        try {
+          await runWithRequiredMigrationEmbedAllowlist(fixture.run, () => embedBatch([baseText], { maxRetries: 0 }));
+        } finally { fixture.cleanup(); }
+      },
+      () => withRequiredPairs(rows, [baseText], [{ ...valid[0], stored_text_sha256: '0'.repeat(64) }],
+        () => embedBatch([baseText], { maxRetries: 0 })),
+      () => withRequiredPairs(rows, [baseText], [{ ...valid[0], provider_text_sha256: '0'.repeat(64) }],
+        () => embedBatch([baseText], { maxRetries: 0 })),
+      () => withRequiredPairs(rows, [baseText], [{ ...valid[0], provider_text_chars: baseText.length + 1 }],
+        () => embedBatch([baseText], { maxRetries: 0 })),
+      () => withRequiredPairs(rows, [baseText], [{ ...valid[0], provider_text_bytes: Buffer.byteLength(baseText) + 1 }],
+        () => embedBatch([baseText], { maxRetries: 0 })),
+      () => withRequiredPairs(rows, [baseText], [], () => embedBatch([baseText], { maxRetries: 0 })),
+      async () => {
+        const twoTexts = ['first', 'second'];
+        const twoRows = staleRows(twoTexts);
+        return withRequiredPairs(twoRows, twoTexts, allowlistEntries(twoRows, twoTexts),
+          () => embedBatch([twoTexts[0]], { maxRetries: 0 }));
+      },
+      async () => {
+        const fixture = loadAllowlist([...valid, valid[0]]);
+        fixture.cleanup();
+      },
+      async () => {
+        const dupRows = [rows[0], rows[0]];
+        return withRequiredPairs(dupRows, [baseText, baseText], valid,
+          () => embedBatch([baseText, baseText], { maxRetries: 0 }));
+      },
+      () => withRequiredPairs(rows, [baseText], valid,
+        () => embedBatch(['different-provider-text'], { maxRetries: 0 })),
+      async () => {
+        const longText = 'x'.repeat(8_001);
+        const longRows = staleRows([longText]);
+        const truncated = longText.slice(0, 8_000);
+        return withRequiredPairs(longRows, [longText], allowlistEntries(longRows, [truncated]),
+          () => embedBatch([longText], { maxRetries: 0 }));
+      },
+    ];
+
+    for (const runCase of cases) {
+      const callsBefore = transport.mock.calls.length;
+      let message = '';
+      try {
+        await runCase();
+        throw new Error('expected REQUIRED allowlist fault');
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(transport.mock.calls.length).toBe(callsBefore);
+      expect(message).not.toContain(baseText);
+    }
+  });
+
+  test('100-item pagination slices identity pairs in the same order', async () => {
+    const texts = Array.from({ length: 101 }, (_, index) => `payload-${index}`);
+    const rows = staleRows(texts);
+    const transport = mock(async ({ values }: { values: string[] }) => fakeEmbeddings(values, 1024));
+    __setEmbedTransportForTests(transport as any);
+
+    const result = await withRequiredPairs(rows, texts, allowlistEntries(rows, texts),
+      () => embedBatch([...texts], { maxRetries: 0, onBatchComplete: () => {} }));
+
+    expect(result).toHaveLength(101);
+    expect(transport.mock.calls.map(([arg]) => (arg as { values: string[] }).values.length)).toEqual([100, 1]);
+    expect(transport.mock.calls.flatMap(([arg]) => (arg as { values: string[] }).values)).toEqual(texts);
+  });
+
+  test('recursive token split and bounded retry revalidate the same immutable pairs', async () => {
+    const texts = ['a', 'b', 'c', 'd'];
+    const rows = staleRows(texts);
+    let retryAttempt = 0;
+    const transport = mock(async ({ values }: { values: string[] }) => {
+      if (values.length === 4) throw VOYAGE_TOKEN_LIMIT_ERROR;
+      if (values.length === 2 && values[0] === 'a' && retryAttempt++ === 0) {
+        const error = new Error('429 rate limited; please try again in 0ms') as Error & { status: number };
+        error.status = 429;
+        throw error;
+      }
+      return fakeEmbeddings(values, 1024);
+    });
+    __setEmbedTransportForTests(transport as any);
+    _setRateLimitFloorsForTests([1]);
+
+    const result = await withRequiredPairs(rows, texts, allowlistEntries(rows, texts),
+      () => embedBatchWithBackoff([...texts]));
+
+    expect(result).toHaveLength(4);
+    expect(transport.mock.calls.map(([arg]) => (arg as { values: string[] }).values)).toEqual([
+      texts,
+      ['a', 'b'],
+      texts,
+      ['a', 'b'],
+      ['c', 'd'],
+    ]);
+  });
+
+  test('permanent-error single fanout carries exactly one matching pair per call', async () => {
+    const texts = ['fanout-a', 'fanout-b'];
+    const rows = staleRows(texts);
+    const transport = mock(async ({ values }: { values: string[] }) => {
+      if (values.length > 1) throw new AIConfigError('permanent request fault');
+      return fakeEmbeddings(values, 1024);
+    });
+    __setEmbedTransportForTests(transport as any);
+
+    const fixture = loadAllowlist(allowlistEntries(rows, texts));
+    try {
+      const result = await runWithRequiredMigrationEmbedAllowlist(fixture.run, async () => {
+        const pairs = createRequiredMigrationEmbedPairs(rows, texts);
+        return __embedPageTextsForTests([...texts], {}, pairs);
+      });
+      expect(result.failed).toBe(0);
+      expect(transport.mock.calls.map(([arg]) => (arg as { values: string[] }).values)).toEqual([
+        texts,
+        ['fanout-a'],
+        ['fanout-b'],
+      ]);
+    } finally {
+      fixture.cleanup();
+    }
   });
 });

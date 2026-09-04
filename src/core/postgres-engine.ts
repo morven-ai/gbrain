@@ -95,6 +95,7 @@ import { LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from './quarantine.ts';
 import { acquireInitSchemaAdvisoryLock } from './postgres-engine/init-schema-lock.ts';
+import { executeRequiredMigrationVectorCasOnEngine, type RequiredMigrationVectorCasInput } from './required-migration-vector-cas.ts';
 import { applyPostgresForwardReferenceBootstrap } from './postgres-engine/forward-reference-bootstrap.ts';
 import * as factsImpl from './postgres-engine/facts.ts';
 import type { PgFactsDeps } from './postgres-engine/facts.ts';
@@ -2206,6 +2207,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Chunks
+  async updateRequiredMigrationChunkEmbeddings(input: RequiredMigrationVectorCasInput): Promise<number> { return executeRequiredMigrationVectorCasOnEngine(this, input); }
   async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn } & BatchOpts): Promise<void> {
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal, () => this._upsertChunksOnce(slug, chunks, opts), chunks.length);
   }

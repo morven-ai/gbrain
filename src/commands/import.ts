@@ -3,7 +3,16 @@ import { execFileSync } from 'child_process';
 import { isAbsolute, join, relative, resolve, sep } from 'path';
 import { cpus, totalmem } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
-import { importFile, importImageFile, isImageFilePath } from '../core/import-file.ts';
+import {
+  importFile,
+  importImageFile,
+  isImageFilePath,
+} from '../core/import-file.ts';
+import {
+  assertRequiredMigrationSyncOptions,
+  RequiredMigrationContractError,
+  type RequiredMigrationSyncOptions,
+} from '../core/required-migration-sync.ts';
 import { loadConfig, gbrainPath } from '../core/config.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
@@ -187,8 +196,16 @@ export async function runImport(
      * `wiki/page1` consistently across full and incremental sync.
      */
     slugRoot?: string;
+    /** Internal-only manifest-bound migration seam. */
+    requiredMigration?: RequiredMigrationSyncOptions;
+    /** Runner-owned cancellation for the internal REQUIRED full-sync path. */
+    signal?: AbortSignal;
   } = {},
 ): Promise<RunImportResult> {
+  if (opts.requiredMigration) {
+    assertRequiredMigrationSyncOptions(opts.requiredMigration);
+    if (opts.signal?.aborted) throw new RequiredMigrationContractError('runner abort signal fired before import');
+  }
   const noEmbed = args.includes('--no-embed');
   const allowNoncanonicalRoot = args.includes('--allow-noncanonical-root');
   const fresh = args.includes('--fresh');
@@ -479,6 +496,9 @@ export async function runImport(
   }
 
   async function processFile(eng: BrainEngine, filePath: string) {
+    if (opts.requiredMigration && opts.signal?.aborted) {
+      throw new RequiredMigrationContractError('runner abort signal fired during import');
+    }
     const relativePath = relative(dir, filePath);
     // #753/#774: slug + source_path base. When performFullSync syncs a
     // monorepo subdir, slugRoot is the git root so slugs stay git-root-
@@ -490,13 +510,27 @@ export async function runImport(
     // forever — without this, the agent can't see which file.
     const _fileT0 = Date.now();
     try {
+      if (
+        opts.requiredMigration &&
+        isImageFilePath(relativePath) &&
+        process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
+      ) {
+        throw new RequiredMigrationContractError(
+          `${importRelPath}: image import is outside the Markdown migration contract`,
+        );
+      }
       // v0.27.1 (F2): dispatch image extensions to importImageFile when
       // multimodal is enabled. The walker (collectMarkdownFiles) only picks
       // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
       // unreachable when the gate is off; defense-in-depth check anyway.
       const result = isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
         ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
-        : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack });
+        : await importFile(eng, filePath, importRelPath, {
+            noEmbed,
+            sourceId,
+            activePack: importActivePack,
+            requiredMigration: opts.requiredMigration,
+          });
       noteTypeWarning((result as { type_warning?: Parameters<typeof noteTypeWarning>[0] }).type_warning);
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {
@@ -531,6 +565,7 @@ export async function runImport(
         }
       }
     } catch (e: unknown) {
+      if (opts.requiredMigration) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       const { count, sample } = recordImportFailure(errorCounts, errorSamples, msg);
       if (count <= 5) {
@@ -634,6 +669,9 @@ export async function runImport(
     }
   }
 
+  if (opts.requiredMigration && opts.signal?.aborted) {
+    throw new RequiredMigrationContractError('runner abort signal fired during import');
+  }
   progress.finish();
 
   // Error summary

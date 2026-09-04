@@ -2,7 +2,18 @@ import { existsSync, readFileSync, writeFileSync, statSync, realpathSync } from 
 import { join, relative, resolve as pathResolve } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
-import { importFile, importImageFile, isImageFilePath as isImageImportPath } from '../core/import-file.ts';
+import {
+  importFile,
+  importImageFile,
+  isImageFilePath as isImageImportPath,
+} from '../core/import-file.ts';
+import {
+  assertRequiredMigrationSyncRuntimeLock,
+  assertRequiredMigrationSyncRuntimeOptions,
+  requiredMigrationProjectionContract,
+  RequiredMigrationContractError,
+  type RequiredMigrationSyncRuntimeOptions,
+} from '../core/required-migration-sync.ts';
 import { collectSyncableFiles, shouldLogIngest } from './import.ts';
 import {
   isSyncable,
@@ -468,6 +479,8 @@ export interface SyncOpts {
    * breadcrumbs already cover that surface).
    */
   onProgress?: (p: { phase: string; bankedFiles?: number }) => void;
+  /** Internal-only manifest-bound migration seam. Never populated by CLI parsing. */
+  requiredMigration?: RequiredMigrationSyncRuntimeOptions;
 }
 
 // The git-plumbing cluster (git(), discoverGitRoot, createSyncBaselineCommit,
@@ -572,6 +585,16 @@ See also:
 export { SyncLockBusyError, runBreakLock } from '../core/sync-lock.ts';
 
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
+  if (opts.requiredMigration) {
+    assertRequiredMigrationSyncRuntimeOptions(opts.requiredMigration);
+    if (opts.sourceId !== opts.requiredMigration.sourceId) {
+      throw new RequiredMigrationContractError(
+        `performSync sourceId must exactly match ${opts.requiredMigration.sourceId}`,
+      );
+    }
+    await assertRequiredMigrationSyncRuntimeLock(engine, opts.requiredMigration);
+    return await performSyncInner(engine, opts);
+  }
   // v0.22.13 CODEX-2: cross-process writer lock prevents two concurrent
   // syncs from racing on the same last_commit anchor (last writer wins,
   // bookmark regresses, silent corruption).
@@ -1963,7 +1986,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       // shapes now fall through to the reconcile below.
       let renameApplied = false;
       try {
-        if (oldSlug !== undefined) renameApplied = (await engine.updateSlug(oldSlug, newSlug, renameOpts)) > 0;
+        // REQUIRED migrations validate the destination's post-transform
+        // projection before any page write. Use add+reconcile semantics so a
+        // bad contract cannot mutate the old row via updateSlug first.
+        if (oldSlug !== undefined && !opts.requiredMigration) {
+          renameApplied = (await engine.updateSlug(oldSlug, newSlug, renameOpts)) > 0;
+        }
       } catch {
         // Destination slug occupied or invalid — treat as add; the reconcile
         // below removes the stale old row once the destination materialized.
@@ -1989,11 +2017,27 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       let importErrored = false;
       if (existsSync(filePath) && isPathSafe(filePath, gitContextRoot)) {
         try {
+          if (
+            opts.requiredMigration &&
+            isImageImportPath(to) &&
+            process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
+          ) {
+            throw new RequiredMigrationContractError(
+              `${to}: image import is outside the Markdown migration contract`,
+            );
+          }
           // #2683: dispatch renamed images to importImageFile (binary bytes
           // through importFile threw UTF-8 errors). Same gate as import.ts.
           const result = isImageImportPath(to) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
             ? await importImageFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId })
-            : await importFile(engine, filePath, to, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack });
+            : await importFile(engine, filePath, to, {
+                noEmbed,
+                sourceId: opts.sourceId,
+                activePack: syncActivePack,
+                requiredMigration: opts.requiredMigration
+                  ? requiredMigrationProjectionContract(opts.requiredMigration)
+                  : undefined,
+              });
           importResult = result;
           noteTypeWarning(result.type_warning);
           if (result.status === 'imported') chunksCreated += result.chunks;
@@ -2011,6 +2055,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
             failedFiles.push({ path: to, error: String((result as { error?: string }).error ?? 'import error') });
           }
         } catch (e: unknown) {
+          if (opts.requiredMigration) throw e;
           importErrored = true;
           failedFiles.push({ path: to, error: e instanceof Error ? e.message : String(e) });
         }
@@ -2269,6 +2314,15 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         throw e;
       }
       try {
+        if (
+          opts.requiredMigration &&
+          isImageImportPath(path) &&
+          process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
+        ) {
+          throw new RequiredMigrationContractError(
+            `${path}: image import is outside the Markdown migration contract`,
+          );
+        }
         // v0.18.0+ multi-source: thread `opts.sourceId` so per-page tx writes
         // (putPage / getTags / addTag / removeTag / deleteChunks / upsertChunks
         // / addLink) target (sourceId, slug). Pre-fix the schema DEFAULT
@@ -2281,7 +2335,14 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         const result = await observed(pacer, () =>
           isImageImportPath(path) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
             ? importImageFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId })
-            : importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
+            : importFile(eng, filePath, path, {
+                noEmbed,
+                sourceId: opts.sourceId,
+                activePack: syncActivePack,
+                requiredMigration: opts.requiredMigration
+                  ? requiredMigrationProjectionContract(opts.requiredMigration)
+                  : undefined,
+              }));
         noteTypeWarning(result.type_warning);
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
@@ -2317,6 +2378,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           await markCompleted(path);
         }
       } catch (e: unknown) {
+        if (opts.requiredMigration) throw e;
         const msg = e instanceof Error ? e.message : String(e);
         serr(`  Warning: skipped ${path}: ${msg}`);
         failedFiles.push({ path, error: msg });
@@ -2971,6 +3033,9 @@ async function performFullSync(
     exclude: opts.exclude,
     includeGitignored: opts.includeGitignored,
     slugRoot,
+    requiredMigration: opts.requiredMigration
+      ? requiredMigrationProjectionContract(opts.requiredMigration)
+      : undefined, signal: opts.requiredMigration ? opts.signal : undefined,
     // issue #1939: performFullSync owns the failure ledger + bookmark via the
     // shared gate below; don't let runImport double-record or write its own.
     managedBookmark: true,
@@ -3291,7 +3356,24 @@ function manageGitignoreAtGitRoot(path: string, engineKind?: 'pglite' | 'postgre
   manageGitignore(root, engineKind);
 }
 
-export async function runSync(engine: BrainEngine, args: string[]) {
+export async function runSync(
+  engine: BrainEngine,
+  args: string[],
+  internalOpts?: RequiredMigrationSyncRuntimeOptions,
+) {
+  if (internalOpts) {
+    assertRequiredMigrationSyncRuntimeOptions(internalOpts);
+    if (args.includes('--all')) {
+      throw new RequiredMigrationContractError('runSync REQUIRED mode refuses --all');
+    }
+    const sourceArgs = args.flatMap((arg, index) => arg === '--source' ? [args[index + 1]] : []);
+    if (sourceArgs.length !== 1 || sourceArgs[0] !== internalOpts.sourceId) {
+      throw new RequiredMigrationContractError(
+        `runSync requires exactly one --source ${internalOpts.sourceId}`,
+      );
+    }
+    await assertRequiredMigrationSyncRuntimeLock(engine, internalOpts);
+  }
   // v0.40 Federated Sync v2: `gbrain sync trigger` subcommand
   // Routes to runSyncTrigger which queues a 'sync' minion job with
   // auto_embed_backfill=true. Falls through to the normal sync path
@@ -3856,6 +3938,7 @@ See also:
         strategy: cfg.strategy,
         concurrency,
         signal: composeAbortSignals(allInterrupt.signal, controller?.signal),
+        requiredMigration: internalOpts,
       };
       // v0.40.6.0 (D6): wrap performSync in withSourcePrefix so every slog /
       // serr line emitted from inside the sync code path gets prefixed with
@@ -4081,7 +4164,8 @@ See also:
     strategy: strategyArg, concurrency,
     srcSubpath,
     exclude: excludePatterns.length > 0 ? excludePatterns : undefined,
-    signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal),
+    signal: composeAbortSignals(singleSourceInterrupt.signal, singleSourceController?.signal, internalOpts?.signal),
+    requiredMigration: internalOpts,
   };
 
   // v0.42.42.0 (#2139, Step 4b): single-source `gbrain sync` gets the SAME
@@ -4204,7 +4288,7 @@ See also:
     if (jsonOut) {
       console.log(JSON.stringify(buildSingleSyncJsonEnvelope(sourceId, result, singleEmbedBackfill)));
     }
-    return;
+    return result;
   }
 
   // Watch mode

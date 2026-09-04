@@ -50,7 +50,12 @@ import { resolveRecipe, assertTouchpoint, parseModelId, embeddingDimsForModel } 
 import { recordChatUsage } from './chat-usage.ts';
 import {
   OPENROUTER_CACHE_HEADER,
+  OPENROUTER_PRIVACY_HEADER,
+  OPENROUTER_PRIVACY_HEADER_VALUE,
+  isOpenRouterPrivacyStrictRun,
+  openrouterPrivacyStrictRequested,
   openrouterRequiresExplicitPromptCache,
+  runWithOpenRouterPrivacyStrict,
 } from './recipes/openrouter.ts';
 import { resolveModel, resolveModelDetailed, resolveEffectiveChatModel, resolveEffectiveExpansionModel } from '../model-config.ts';
 import { parseLlmJson } from '../llm-json.ts';
@@ -64,6 +69,15 @@ import type { GBrainConfig } from '../config.ts';
 import { mergedProviderEnv } from './provider-env.ts';
 import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gateway-config.ts';
 import { assertOutboundChatAllowed, assertOutboundImageEmbeddingAllowed, assertOutboundEmbeddingAllowed } from './outbound-gate.ts';
+import {
+  bindRequiredMigrationProviderTexts,
+  runWithRequiredMigrationTransportAttempt,
+  type RequiredMigrationEmbedPair,
+} from '../required-migration-embed-allowlist.ts';
+import {
+  RequiredMigrationWireAttemptError,
+  isRequiredMigrationEmbedAllowlistModeRequired,
+} from '../required-migration-wire-attempt.ts';
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
 //
 // Plain `fetch` (Bun/Node) has NO default request timeout, so a stalled provider
@@ -1772,6 +1786,11 @@ export interface EmbedOpts {
   dimensions?: number;
 }
 
+interface GatewayEmbedInput {
+  readonly text: string;
+  readonly requiredPair?: RequiredMigrationEmbedPair;
+}
+
 export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32Array[]> {
   if (!texts || texts.length === 0) { assertOutboundEmbeddingAllowed([]); return []; }
 
@@ -1784,6 +1803,11 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = texts.map(t => truncateUtf8(t ?? '', MAX_CHARS));
+  const requiredPairs = bindRequiredMigrationProviderTexts(texts, truncated);
+  const inputs: readonly GatewayEmbedInput[] = Object.freeze(truncated.map((text, index) => Object.freeze({
+    text,
+    ...(requiredPairs ? { requiredPair: requiredPairs[index] } : {}),
+  })));
   assertOutboundEmbeddingAllowed(truncated);
   // Reserve up front for the worst-case batch token count. Embeddings have
   // no output rate, so maxOutputTokens=0. record() at the end uses the
@@ -1819,9 +1843,15 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
 
   // Pre-split is gated on max_batch_tokens. Recipes without it (e.g. OpenAI)
   // ride the fast path: one embedMany call, no recursion safety net.
-  const tokenBatches = maxBatchTokens
+  const tokenTextBatches = maxBatchTokens
     ? splitByTokenBudget(truncated, Math.floor(maxBatchTokens * effectiveSafetyFactor(recipe)), charsPerToken)
     : [truncated];
+  let inputOffset = 0;
+  const tokenBatches = tokenTextBatches.map((batch) => {
+    const inputBatch = inputs.slice(inputOffset, inputOffset + batch.length);
+    inputOffset += batch.length;
+    return inputBatch;
+  });
 
   // Hard COUNT cap (e.g. llama-server's "maximum allowed batch size 32").
   // Token budget can't bound item count, so re-split any oversized batch.
@@ -1838,17 +1868,35 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
     embedding?.max_batch_items ??
     (embedding?.no_batch_cap === true ? NO_BATCH_CAP_SUB_BATCH_ITEMS : undefined);
   const batches = maxBatchItems
-    ? tokenBatches.flatMap(b => capBatchItems(b, maxBatchItems))
+    ? tokenBatches.flatMap((batch) => {
+      if (batch.length <= maxBatchItems) return [batch];
+      const capped: Array<readonly GatewayEmbedInput[]> = [];
+      for (let i = 0; i < batch.length; i += maxBatchItems) capped.push(batch.slice(i, i + maxBatchItems));
+      return capped;
+    })
     : tokenBatches;
 
   const allEmbeddings: Float32Array[] = [];
   let _embedThrew = false;
-  try {
+  const runBatches = async (): Promise<Float32Array[]> => {
     for (const batch of batches) {
       const result = await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId, opts);
       allEmbeddings.push(...result);
     }
     return allEmbeddings;
+  };
+  try {
+    const requiredMode = isRequiredMigrationEmbedAllowlistModeRequired();
+    const configPrivacyStrict = openrouterPrivacyStrictRequested(cfg.env);
+    if (recipe.id === 'openrouter' && requiredMode) {
+      if (!configPrivacyStrict || !openrouterPrivacyStrictRequested(process.env)) {
+        throw new RequiredMigrationWireAttemptError('context');
+      }
+      return await runWithOpenRouterPrivacyStrict(runBatches);
+    }
+    return recipe.id === 'openrouter' && configPrivacyStrict
+      ? await runWithOpenRouterPrivacyStrict(runBatches)
+      : await runBatches();
   } catch (err) {
     _embedThrew = true;
     throw err;
@@ -2003,7 +2051,7 @@ export function __getShrinkStateForTests(recipeId: string): ShrinkEntry | undefi
  * If the batch is already at MIN_SUB_BATCH and still fails, throws.
  */
 async function embedSubBatch(
-  texts: string[],
+  inputs: readonly GatewayEmbedInput[],
   model: any,
   providerOpts: any,
   expectedDims: number,
@@ -2011,18 +2059,30 @@ async function embedSubBatch(
   modelId: string,
   opts?: EmbedOpts,
 ): Promise<Float32Array[]> {
+  const texts = inputs.map(input => input.text);
+  const requiredPairs = inputs.some(input => input.requiredPair !== undefined)
+    ? inputs.map(input => input.requiredPair).filter((pair): pair is RequiredMigrationEmbedPair => pair !== undefined)
+    : undefined;
   try {
-    const callTransport = () => _embedTransport({
-      model,
-      values: texts,
-      providerOptions: providerOpts,
-      // v0.42.20.0 — default a per-SUB-BATCH embed timeout (codex #3: bounding
-      // once at embed() top would cap a whole multi-batch import; this is the
-      // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
-      // deadline) — shorter wins.
-      abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
-      ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
-    });
+    const callTransport = () => runWithRequiredMigrationTransportAttempt(
+      texts, requiredPairs, recipe.id === 'openrouter' && isOpenRouterPrivacyStrictRun()
+        ? `${recipe.id}:${modelId}`
+        : undefined,
+      () => _embedTransport({
+        model,
+        values: texts,
+        providerOptions: providerOpts,
+        ...(recipe.id === 'openrouter' && isOpenRouterPrivacyStrictRun()
+          ? { headers: { [OPENROUTER_PRIVACY_HEADER]: OPENROUTER_PRIVACY_HEADER_VALUE } }
+          : {}),
+        // v0.42.20.0 — default a per-SUB-BATCH embed timeout (codex #3: bounding
+        // once at embed() top would cap a whole multi-batch import; this is the
+        // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
+        // deadline) — shorter wins.
+        abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
+        ...(opts?.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
+      }),
+    );
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —
     // see the store's doc comment). Populated only when dimsProviderOptions
@@ -2055,11 +2115,11 @@ async function embedSubBatch(
     // On token-limit error, tighten the recipe's effective safety factor
     // (so the next embed() pre-splits smaller) and recursively halve THIS
     // batch to make forward progress without dropping work.
-    if (isTokenLimitError(err) && texts.length > MIN_SUB_BATCH) {
+    if (isTokenLimitError(err) && inputs.length > MIN_SUB_BATCH) {
       shrinkOnMiss(recipe);
-      const mid = Math.ceil(texts.length / 2);
-      const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts);
-      const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
+      const mid = Math.ceil(inputs.length / 2);
+      const left = await embedSubBatch(inputs.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId, opts);
+      const right = await embedSubBatch(inputs.slice(mid), model, providerOpts, expectedDims, recipe, modelId, opts);
       return [...left, ...right];
     }
     throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`);

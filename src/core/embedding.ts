@@ -13,6 +13,7 @@ import {
   getEmbeddingDimensions as gatewayGetDims,
 } from './ai/gateway.ts';
 import { lookupEmbeddingPrice } from './embedding-pricing.ts';
+import { runWithRequiredMigrationEmbedPairSlice } from './required-migration-embed-allowlist.ts';
 
 // v0.27.1: re-export multimodal embedding so callers can pull both text and
 // image embedding APIs from `src/core/embedding`. import-image-file consumes
@@ -101,12 +102,22 @@ export async function embedBatch(
   };
   // Fast path: small batch, no progress callback — single gateway call.
   if (texts.length <= BATCH_SIZE && !options.onBatchComplete) {
-    return gatewayEmbed(texts, gwOpts);
+    return runWithRequiredMigrationEmbedPairSlice(
+      texts,
+      0,
+      texts.length,
+      () => gatewayEmbed(texts, gwOpts),
+    );
   }
   const results: Float32Array[] = [];
   for (let i = 0; i < texts.length; i += BATCH_SIZE) {
     const slice = texts.slice(i, i + BATCH_SIZE);
-    const out = await gatewayEmbed(slice, gwOpts);
+    const out = await runWithRequiredMigrationEmbedPairSlice(
+      texts,
+      i,
+      i + slice.length,
+      () => gatewayEmbed(slice, gwOpts),
+    );
     results.push(...out);
     options.onBatchComplete?.(results.length, texts.length);
   }

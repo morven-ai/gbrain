@@ -144,6 +144,15 @@ describe('lookupEmbeddingPrice — nested gateway ids (#2504)', () => {
     }
   });
 
+  test('OpenRouter Gemini embedding is canonically priced at $0.15/MTok', () => {
+    const r = lookupEmbeddingPrice('openrouter:google/gemini-embedding-001');
+    expect(r.kind).toBe('known');
+    if (r.kind === 'known') {
+      expect(r.pricePerMTok).toBe(0.15);
+      expect(r.key).toBe('openrouter:google/gemini-embedding-001');
+    }
+  });
+
   test('trailing/leading slash does not recurse into an empty key', () => {
     expect(lookupEmbeddingPrice('openrouter:model-9000/').kind).toBe('unknown');
     expect(lookupEmbeddingPrice('openrouter:/model-9000').kind).toBe('unknown');

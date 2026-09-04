@@ -1079,6 +1079,7 @@ export interface BrainEngine {
    * pre-registry brains. `embedding_image` routing is unaffected.
    */
   upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn } & BatchOpts): Promise<void>;
+  updateRequiredMigrationChunkEmbeddings(input: import('./required-migration-vector-cas.ts').RequiredMigrationVectorCasInput): Promise<number>;
   /**
    * Read every chunk for a page. Scope precedence mirrors getPage (#2555):
    * a federated grant (`sourceIds[]`) wins over scalar `sourceId`; with

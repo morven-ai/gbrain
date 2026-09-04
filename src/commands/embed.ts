@@ -31,6 +31,18 @@ import {
   isTransientNetworkEmbedError,
   type EmbedBatchWithBackoffOpts,
 } from '../core/embed-retry.ts';
+import {
+  createRequiredMigrationEmbedPairs,
+  loadRequiredMigrationEmbedAllowlistFromEnv,
+  runWithRequiredMigrationEmbedAllowlist,
+  runWithRequiredMigrationEmbedPairs,
+  type RequiredMigrationEmbedPair,
+} from '../core/required-migration-embed-allowlist.ts';
+import {
+  admitRequiredMigrationEmbedRun,
+  runRequiredMigrationEmbedDrain,
+  type RequiredMigrationEmbedAdmission,
+} from '../core/required-migration-embed-run.ts';
 
 // Peeled to src/core/embed-retry.ts (core→commands layering fix: core modules
 // import-file.ts / embed-stale.ts consume these, and a commands module in
@@ -335,6 +347,22 @@ async function preflightDimMismatch(engine: BrainEngine, dryRun: boolean): Promi
 }
 
 export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promise<EmbedResult> {
+  const requiredAllowlist = loadRequiredMigrationEmbedAllowlistFromEnv();
+  if (requiredAllowlist) {
+    const admission = await admitRequiredMigrationEmbedRun(engine, requiredAllowlist, opts);
+    return runWithRequiredMigrationEmbedAllowlist(
+      requiredAllowlist,
+      () => runEmbedCoreUnscoped(engine, opts, admission),
+    );
+  }
+  return runEmbedCoreUnscoped(engine, opts);
+}
+
+async function runEmbedCoreUnscoped(
+  engine: BrainEngine,
+  opts: EmbedOpts,
+  requiredAdmission?: RequiredMigrationEmbedAdmission,
+): Promise<EmbedResult> {
   // v0.37.10.0 T7 (D9): refuse cleanly when init persisted the deferred-setup
   // sentinel. Skipped in dryRun mode so plan-mode introspection still works.
   if (!opts.dryRun) {
@@ -388,6 +416,14 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     return result;
   }
   if (opts.all || opts.stale) {
+    if (requiredAdmission) {
+      await runRequiredMigrationEmbedDrain(engine, requiredAdmission, result, {
+        batchSize: opts.batchSize,
+        signal: opts.signal,
+        onProgress: opts.onProgress,
+      });
+      return result;
+    }
     // E-2 (paced-backfill): CLI single-flight. Take the SAME per-source lock as
     // the embed-backfill minion handler so a hand-run backfill and a queued job
     // are mutually exclusive per source. All-source runs lock every source in
@@ -1709,9 +1745,12 @@ async function embedAllStale(
           // #3037: per-chunk failure isolation — one bad chunk costs one
           // chunk, not the whole page's siblings. The wrapped texts feed the
           // fan-out too, so an isolation retry never strips the prefixes.
+          const wrappedTexts = wrapChunkTextsForStoredMode(pageRow, stale);
+          const requiredPairs = createRequiredMigrationEmbedPairs(stale, wrappedTexts);
           const { embeddings, failed, firstError } = await embedPageTexts(
-            wrapChunkTextsForStoredMode(pageRow, stale),
+            wrappedTexts,
             { abortSignal: effectiveSignal },
+            requiredPairs,
           );
           // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
@@ -1889,9 +1928,16 @@ function statusFromCause(e: unknown): number | undefined {
 async function embedPageTexts(
   texts: string[],
   opts: EmbedBatchWithBackoffOpts = {},
+  requiredPairs?: readonly RequiredMigrationEmbedPair[],
 ): Promise<{ embeddings: (Float32Array | null)[]; failed: number; firstError?: unknown }> {
   try {
-    return { embeddings: await embedBatchWithBackoff(texts, opts), failed: 0 };
+    return {
+      embeddings: await runWithRequiredMigrationEmbedPairs(
+        requiredPairs,
+        () => embedBatchWithBackoff(texts, opts),
+      ),
+      failed: 0,
+    };
   } catch (e: unknown) {
     if (opts.abortSignal?.aborted) throw e; // shutdown, not a chunk problem
     if (texts.length <= 1) throw e; // nothing to isolate
@@ -1904,9 +1950,13 @@ async function embedPageTexts(
     const embeddings: (Float32Array | null)[] = [];
     let failed = 0;
     let firstError: unknown;
-    for (const t of texts) {
+    for (let i = 0; i < texts.length; i++) {
+      const t = texts[i];
       try {
-        const single = await embedBatchWithBackoff([t], opts);
+        const single = await runWithRequiredMigrationEmbedPairs(
+          requiredPairs ? Object.freeze([requiredPairs[i]]) : undefined,
+          () => embedBatchWithBackoff([t], opts),
+        );
         embeddings.push(single[0] ?? null);
         if (single[0] === undefined) { failed++; firstError ??= e; }
       } catch (chunkErr: unknown) {
@@ -1920,3 +1970,6 @@ async function embedPageTexts(
     return { embeddings, failed, firstError };
   }
 }
+
+/** @internal Test seam for REQUIRED pair preservation through permanent-error fanout. */
+export const __embedPageTextsForTests = embedPageTexts;

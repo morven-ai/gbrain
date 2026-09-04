@@ -34,6 +34,8 @@ export const EMBEDDING_PRICING: Record<string, EmbeddingPricing> = {
   'openai:text-embedding-3-small': { pricePerMTok: 0.02 },
   // Legacy OpenAI ada (still common in older brains)
   'openai:text-embedding-ada-002': { pricePerMTok: 0.10 },
+  // OpenRouter (https://openrouter.ai/google/gemini-embedding-001, verified 2026-08-30)
+  'openrouter:google/gemini-embedding-001': { pricePerMTok: 0.15 },
   // Voyage (https://docs.voyageai.com/docs/pricing, verified 2026-08-21)
   'voyage:voyage-4-large':         { pricePerMTok: 0.12 },
   'voyage:voyage-4':               { pricePerMTok: 0.06 },

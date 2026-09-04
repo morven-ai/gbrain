@@ -50,6 +50,14 @@ import { DEFAULT_SYNOPSIS_MODEL } from './page-summary.ts';
 import { runGuardrails } from './guardrails.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, renderFactsTable, restoreHiddenFactRows, factsGapWarning } from './facts-fence.ts';
 import { scanFencedBlocks, MAX_FENCES_PER_PAGE } from './fence-scan.ts';
+import {
+  assertRequiredMigrationContentSkipState,
+  assertRequiredMigrationProjection,
+  RequiredMigrationContractError,
+  resolveRequiredMigrationFileContract,
+  type RequiredMigrationFileContract,
+  type RequiredMigrationSyncOptions,
+} from './required-migration-sync.ts';
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -369,6 +377,8 @@ export async function importFromContent(
      * and reindex leave it unset so the guard stays armed.
      */
     allowEmptyOverwrite?: boolean;
+    /** Internal-only manifest-bound migration contract, resolved by importFromFile. */
+    requiredMigrationFile?: RequiredMigrationFileContract & { relativePath: string };
   } = {},
 ): Promise<ImportResult> {
   // Normalize BEFORE any tx write: putPage lowercases via validateSlug but
@@ -709,7 +719,8 @@ export async function importFromContent(
     tags: parsed.tags,
   };
 
-  if (existing?.content_hash === hash && !opts.forceRechunk) {
+  const contentUnchanged = existing?.content_hash === hash && !opts.forceRechunk;
+  if (contentUnchanged && !opts.requiredMigrationFile) {
     return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
   }
 
@@ -718,7 +729,7 @@ export async function importFromContent(
   // the content is unchanged — stamp the canonical hash via the narrow
   // refreshPageBody UPDATE (no chunk churn, no re-embed, no version snapshot)
   // and skip. The next import then hits the fast path above.
-  if (existing && !opts.forceRechunk && typeof engine.refreshPageBody === 'function') {
+  if (existing && !opts.forceRechunk && !opts.requiredMigrationFile && typeof engine.refreshPageBody === 'function') {
     const legacyHash = contentHashLegacy({
       title: parsed.title,
       type: parsed.type,
@@ -782,6 +793,11 @@ export async function importFromContent(
       const dupFmIdStr = typeof dupFmId === 'string' && dupFmId.length > 0 ? dupFmId : null;
       const sameExternalId = fmIdStr !== null && dupFmIdStr === fmIdStr;
       if (sameExternalId) {
+        if (opts.requiredMigrationFile) {
+          throw new RequiredMigrationContractError(
+            `${opts.requiredMigrationFile.relativePath}: identity dedup would redirect the required page`,
+          );
+        }
         // True duplicate (same external ID). Skip + log to stderr.
         process.stderr.write(
           `[import] skipping ${opts.sourcePath ?? slug}: identical to ${dup.slug} ` +
@@ -835,6 +851,27 @@ export async function importFromContent(
     if (parsed.compiled_truth.trim()) {
       const fenceChunks = await extractFencedChunks(parsed.compiled_truth, chunks.length);
       chunks.push(...fenceChunks);
+    }
+  }
+
+  if (opts.requiredMigrationFile) {
+    assertRequiredMigrationProjection(
+      opts.requiredMigrationFile,
+      opts.requiredMigrationFile.relativePath,
+      content,
+      hash,
+      chunks,
+    );
+    if (contentUnchanged && existing) {
+      await assertRequiredMigrationContentSkipState(
+        engine,
+        slug,
+        sourceId ?? 'default',
+        existing,
+        opts.requiredMigrationFile,
+        opts.requiredMigrationFile.relativePath,
+      );
+      return { slug, status: 'skipped', chunks: 0, parsedPage, ...(typeWarning ? { type_warning: typeWarning } : {}) };
     }
   }
 
@@ -974,14 +1011,23 @@ export async function importFromContent(
       // v0.39.3.0 provenance write-through (WARN-8). Engine layer applies
       // COALESCE-preserve UPDATE so omitting these on a later put_page
       // doesn't erase the original ingestion's audit trail.
-      source_kind: opts.source_kind ?? null,
-      source_uri: opts.source_uri ?? null,
-      ingested_via: opts.ingested_via ?? null,
+      source_kind: opts.requiredMigrationFile?.pageProvenance.source_kind ?? opts.source_kind ?? null,
+      source_uri: opts.requiredMigrationFile?.pageProvenance.source_uri ?? opts.source_uri ?? null,
+      ingested_via: opts.requiredMigrationFile?.pageProvenance.ingested_via ?? opts.ingested_via ?? null,
       // ingested_at is server-stamped at the engine layer when any
       // provenance write fires; never client-controlled.
       // Empty-overwrite escape hatch only when the caller vouched (file
       // import / explicit allow_empty); otherwise the engine guard stays on.
     }, opts.allowEmptyOverwrite === true ? { ...txOpts, allowEmptyOverwrite: true } : txOpts);
+
+    if (opts.requiredMigrationFile) {
+      await tx.putRawData(
+        slug,
+        opts.requiredMigrationFile.rawData.source,
+        opts.requiredMigrationFile.rawData.data,
+        txOpts,
+      );
+    }
 
     // v0.40.3.0: stamp the contextual retrieval state columns alongside
     // the page write. updatePageContextualRetrievalState is a narrow
@@ -1220,6 +1266,8 @@ export async function importFromFile(
      * never per file (codex perf finding #7).
      */
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string> }> };
+    /** Internal-only REQUIRED migration resolver. */
+    requiredMigration?: RequiredMigrationSyncOptions;
   } = {},
 ): Promise<ImportResult> {
   // Defense-in-depth: reject symlinks before reading content.
@@ -1256,8 +1304,15 @@ export async function importFromFile(
     };
   }
 
+  const requiredMigrationFile = opts.requiredMigration
+    ? await resolveRequiredMigrationFileContract(opts.requiredMigration, relativePath)
+    : undefined;
+
   // Route code files through the code import path
   if (isCodeFilePath(relativePath)) {
+    if (requiredMigrationFile) {
+      throw new RequiredMigrationContractError(`${relativePath}: code-file import is outside the Markdown migration contract`);
+    }
     return importCodeFile(engine, relativePath, content, {
       noEmbed: opts.noEmbed,
       sourceId: opts.sourceId,
@@ -1387,6 +1442,7 @@ export async function importFromFile(
     // The disk file IS the source of truth: a file the user emptied is a
     // deliberate clear, so it passes putPage's empty-overwrite guard.
     allowEmptyOverwrite: true,
+    ...(requiredMigrationFile ? { requiredMigrationFile: { ...requiredMigrationFile, relativePath } } : {}),
   });
 }
 

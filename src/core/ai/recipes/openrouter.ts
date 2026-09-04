@@ -1,4 +1,10 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Recipe } from '../types.ts';
+import {
+  RequiredMigrationWireAttemptError,
+  isRequiredMigrationEmbedAllowlistModeRequired,
+  runRequiredMigrationNativeAttempt,
+} from '../../required-migration-wire-attempt.ts';
 import { openaiModelSupportsPromptCache } from './openai.ts';
 
 /**
@@ -14,6 +20,28 @@ import { openaiModelSupportsPromptCache } from './openai.ts';
  * through untouched.
  */
 export const OPENROUTER_CACHE_HEADER = 'x-gbrain-anthropic-prompt-cache';
+
+/** Private embedding privacy marker; stripped by the compat fetch before egress. */
+export const OPENROUTER_PRIVACY_HEADER = 'x-gbrain-openrouter-privacy';
+export const OPENROUTER_PRIVACY_HEADER_VALUE = 'zdr-deny-v1';
+export const OPENROUTER_PRIVACY_STRICT_ENV = 'GBRAIN_OPENROUTER_PRIVACY_STRICT';
+export const OPENROUTER_PRIVACY_STRICT_VALUE = '1';
+
+const openrouterPrivacyStrictStore = new AsyncLocalStorage<true>();
+
+export function openrouterPrivacyStrictRequested(
+  env: Record<string, string | undefined>,
+): boolean {
+  return env[OPENROUTER_PRIVACY_STRICT_ENV] === OPENROUTER_PRIVACY_STRICT_VALUE;
+}
+
+export function runWithOpenRouterPrivacyStrict<T>(fn: () => T): T {
+  return openrouterPrivacyStrictStore.run(true, fn);
+}
+
+export function isOpenRouterPrivacyStrictRun(): boolean {
+  return openrouterPrivacyStrictStore.getStore() === true;
+}
 
 /**
  * Family-scoped prompt-cache capability (per OpenRouter docs):
@@ -88,9 +116,9 @@ function withSystemCacheControl(body: unknown): unknown {
 }
 
 /**
- * Compat fetch: honors the OPENROUTER_CACHE_HEADER marker by splicing an
- * Anthropic cache_control breakpoint onto the system block, then strips the
- * marker. Fail-open: any parse problem sends the original body unchanged.
+ * Compat fetch: handles the prompt-cache marker plus the embedding privacy
+ * marker. Independent ALS state is the strict-run SSOT, so marker loss fails
+ * before native fetch.
  *
  * @internal exported for tests. Cast through `unknown` because TS's
  * `typeof fetch` includes a `preconnect` member (matches azure-openai.ts).
@@ -99,24 +127,88 @@ export const openrouterCompatFetch = (async (
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> => {
-  if (!init?.headers) return fetch(input as any, init as any);
-  const headers = new Headers(init.headers as any);
-  if (!headers.has(OPENROUTER_CACHE_HEADER)) return fetch(input as any, init as any);
-  headers.delete(OPENROUTER_CACHE_HEADER);
-  let body = init.body;
-  if (typeof body === 'string') {
+  const strictPrivacy = isOpenRouterPrivacyStrictRun();
+  if (isRequiredMigrationEmbedAllowlistModeRequired() && !strictPrivacy) {
+    throw new RequiredMigrationWireAttemptError('context');
+  }
+  if (!strictPrivacy && !init?.headers) return fetch(input as any, init as any);
+  const headers = new Headers(init?.headers as any);
+  const privacyMarker = headers.get(OPENROUTER_PRIVACY_HEADER);
+  const hasPrivacyMarker = privacyMarker !== null;
+  const hasCacheMarker = headers.has(OPENROUTER_CACHE_HEADER);
+  if (!strictPrivacy && !hasPrivacyMarker && !hasCacheMarker) {
+    return fetch(input as any, init as any);
+  }
+
+  if (strictPrivacy) {
+    if (privacyMarker !== OPENROUTER_PRIVACY_HEADER_VALUE) {
+      throw new Error('OpenRouter strict privacy refusal: privacy marker mismatch');
+    }
+    let url: URL;
     try {
-      const parsed = JSON.parse(body);
+      url = input instanceof URL
+        ? input
+        : new URL(typeof input === 'string' ? input : input.url);
+    } catch {
+      throw new Error('OpenRouter strict privacy refusal: request URL mismatch');
+    }
+    if (url.origin !== 'https://openrouter.ai') {
+      throw new Error('OpenRouter strict privacy refusal: origin mismatch');
+    }
+    if (url.pathname !== '/api/v1/embeddings') {
+      throw new Error('OpenRouter strict privacy refusal: embeddings path mismatch');
+    }
+  }
+
+  headers.delete(OPENROUTER_PRIVACY_HEADER);
+  headers.delete(OPENROUTER_CACHE_HEADER);
+  let body = init?.body;
+  let parsed: unknown;
+  if (strictPrivacy || privacyMarker === OPENROUTER_PRIVACY_HEADER_VALUE) {
+    if (typeof body !== 'string') {
+      throw new Error('OpenRouter strict privacy refusal: body is not a JSON string');
+    }
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      throw new Error('OpenRouter strict privacy refusal: malformed JSON body');
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('OpenRouter strict privacy refusal: body is not a JSON object');
+    }
+    const record = parsed as Record<string, unknown>;
+    const provider = record.provider;
+    if (provider !== undefined && (!provider || typeof provider !== 'object' || Array.isArray(provider))) {
+      throw new Error('OpenRouter strict privacy refusal: provider is not an object');
+    }
+    parsed = {
+      ...record,
+      provider: {
+        ...((provider ?? {}) as Record<string, unknown>),
+        zdr: true,
+        data_collection: 'deny',
+      },
+    };
+    body = JSON.stringify(parsed);
+    headers.delete('content-length');
+  }
+
+  if (hasCacheMarker && typeof body === 'string') {
+    try {
+      parsed ??= JSON.parse(body);
       const rewritten = withSystemCacheControl(parsed);
       if (rewritten !== parsed) {
         body = JSON.stringify(rewritten);
         headers.delete('content-length');
       }
     } catch {
-      // Non-JSON body: let the provider surface the original problem.
+      // Cache-only non-JSON body keeps the existing fail-open behavior.
     }
   }
-  return fetch(input as any, { ...init, headers, body } as any);
+  return runRequiredMigrationNativeAttempt(
+    parsed,
+    () => fetch(input as any, { ...init, headers, body } as any),
+  );
 }) as unknown as typeof fetch;
 
 /**
@@ -172,7 +264,12 @@ export const openrouter: Recipe = {
   base_url_default: 'https://openrouter.ai/api/v1',
   auth_env: {
     required: ['OPENROUTER_API_KEY'],
-    optional: ['OPENROUTER_BASE_URL', 'OPENROUTER_REFERER', 'OPENROUTER_TITLE'],
+    optional: [
+      'OPENROUTER_BASE_URL',
+      'OPENROUTER_REFERER',
+      'OPENROUTER_TITLE',
+      OPENROUTER_PRIVACY_STRICT_ENV,
+    ],
     setup_url: 'https://openrouter.ai/settings/keys',
   },
   resolveDefaultHeaders(env) {
@@ -190,6 +287,7 @@ export const openrouter: Recipe = {
   },
   touchpoints: {
     embedding: {
+      // @llm-api-key-ok: a — subscription CLIs do not expose embedding vectors.
       models: ['openai/text-embedding-3-small'],
       // #4114: per-model native dims for the catalog the docs invite users to
       // pick. The old recipe-wide `default_dims: 1536` was only right for
@@ -283,6 +381,6 @@ export const openrouter: Recipe = {
     },
   },
   setup_hint:
-    'Get an API key at https://openrouter.ai/settings/keys, then `export OPENROUTER_API_KEY=...` or set `openrouter_api_key` in ~/.gbrain/config.json and use `openrouter:<provider>/<model>`. Optional overrides: OPENROUTER_BASE_URL (proxy), OPENROUTER_REFERER (attribution URL), OPENROUTER_TITLE (attribution name).',
+    'Get an API key at https://openrouter.ai/settings/keys, then `export OPENROUTER_API_KEY=...` or set `openrouter_api_key` in ~/.gbrain/config.json and use `openrouter:<provider>/<model>`. Optional overrides: OPENROUTER_BASE_URL (proxy), OPENROUTER_REFERER (attribution URL), OPENROUTER_TITLE (attribution name), GBRAIN_OPENROUTER_PRIVACY_STRICT=1 (embedding-only strict ZDR/data-denial wire gate).',
   compat: { fetch: openrouterCompatFetch },
 };

@@ -52,6 +52,18 @@ export interface DbLockHandle {
   refresh: (opts?: { signal?: AbortSignal }) => Promise<boolean>;
 }
 
+const dbLockHandleEngines = new WeakMap<DbLockHandle, BrainEngine>();
+
+function bindDbLockHandle(engine: BrainEngine, handle: DbLockHandle): DbLockHandle {
+  dbLockHandleEngines.set(handle, engine);
+  return handle;
+}
+
+/** Exact runtime provenance check for internal seams that receive a held handle. */
+export function isDbLockHandleForEngine(handle: DbLockHandle, engine: BrainEngine): boolean {
+  return dbLockHandleEngines.get(handle) === engine;
+}
+
 /**
  * W0 fix-wave: thrown (or used as an AbortSignal reason) when a fenced
  * refresh discovers the lock row no longer belongs to this acquisition.
@@ -270,7 +282,7 @@ export async function tryAcquireDbLock(
         WHERE id = ${lockId} AND holder_pid = ${pid} AND extract(epoch from acquired_at)::text = ${fence}
       `;
     });
-    return {
+    return bindDbLockHandle(engine, {
       id: lockId,
       acquiredAt: fence,
       refresh: async (refreshOpts?: { signal?: AbortSignal }) => {
@@ -296,7 +308,7 @@ export async function tryAcquireDbLock(
           WHERE id = ${lockId} AND holder_pid = ${pid} AND extract(epoch from acquired_at)::text = ${fence}
         `;
       },
-    };
+    });
   }
 
   if (engine.kind === 'pglite' && maybePGLite.db) {
@@ -326,7 +338,7 @@ export async function tryAcquireDbLock(
         [lockId, pid, fence],
       );
     });
-    return {
+    return bindDbLockHandle(engine, {
       id: lockId,
       acquiredAt: fence,
       refresh: async () => {
@@ -347,7 +359,7 @@ export async function tryAcquireDbLock(
           [lockId, pid, fence],
         );
       },
-    };
+    });
   }
 
   throw new Error(`Unknown engine kind for db-lock: ${engine.kind}`);

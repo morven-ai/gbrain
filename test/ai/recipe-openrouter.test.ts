@@ -10,16 +10,36 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { withEnv } from '../helpers/with-env.ts';
 import { getRecipe } from '../../src/core/ai/recipes/index.ts';
 import {
   OPENROUTER_CACHE_HEADER,
+  OPENROUTER_PRIVACY_HEADER,
+  OPENROUTER_PRIVACY_HEADER_VALUE,
+  OPENROUTER_PRIVACY_STRICT_ENV,
   openrouterCompatFetch,
+  openrouterPrivacyStrictRequested,
   openrouterRequiresExplicitPromptCache,
   openrouterSupportsPromptCache,
+  runWithOpenRouterPrivacyStrict,
 } from '../../src/core/ai/recipes/openrouter.ts';
-import { defaultResolveAuth } from '../../src/core/ai/gateway.ts';
+import {
+  __setEmbedTransportForTests,
+  configureGateway,
+  defaultResolveAuth,
+  embed,
+  resetGateway,
+} from '../../src/core/ai/gateway.ts';
 import { assertTouchpoint, embeddingDimsForModel } from '../../src/core/ai/model-resolver.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
+import type { RequiredMigrationEmbedPair } from '../../src/core/required-migration-embed-allowlist.ts';
+import {
+  REQUIRED_MIGRATION_EMBED_ALLOWLIST_MODE_ENV,
+  REQUIRED_MIGRATION_PRIVACY_POLICY,
+  runWithRequiredMigrationWireAttemptHook,
+  runWithRequiredMigrationWireAttemptPairs,
+  type RequiredMigrationNativeAttemptSummary,
+} from '../../src/core/required-migration-wire-attempt.ts';
 
 // D5 shape regex: provider/model slug, allowing letters, digits, dots, hyphens,
 // underscores in the model portion. Matches real OR catalog IDs like
@@ -257,5 +277,207 @@ describe('recipe: openrouter', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test('16. strict privacy merge strips its marker and forces ZDR + data denial', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ input, init });
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      await runWithOpenRouterPrivacyStrict(() =>
+        openrouterCompatFetch('https://openrouter.ai/api/v1/embeddings', {
+          method: 'POST',
+          headers: {
+            [OPENROUTER_PRIVACY_HEADER]: OPENROUTER_PRIVACY_HEADER_VALUE,
+            'content-length': '999',
+          },
+          body: JSON.stringify({
+            model: 'google/gemini-embedding-001',
+            input: ['fixture'],
+            provider: { order: ['google'], zdr: false, data_collection: 'allow' },
+          }),
+        }),
+      );
+
+      expect(calls).toHaveLength(1);
+      const headers = new Headers(calls[0].init?.headers);
+      expect(headers.has(OPENROUTER_PRIVACY_HEADER)).toBe(false);
+      expect(headers.has('content-length')).toBe(false);
+      const body = JSON.parse(calls[0].init?.body as string);
+      expect(body.provider).toEqual({
+        order: ['google'],
+        zdr: true,
+        data_collection: 'deny',
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('17. strict privacy faults refuse before native fetch', async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const validHeaders = { [OPENROUTER_PRIVACY_HEADER]: OPENROUTER_PRIVACY_HEADER_VALUE };
+    const validBody = JSON.stringify({ model: 'google/gemini-embedding-001', input: ['fixture'] });
+    const faults: Array<[string, RequestInfo | URL, RequestInit]> = [
+      ['missing marker', 'https://openrouter.ai/api/v1/embeddings', { method: 'POST', body: validBody }],
+      ['marker mismatch', 'https://openrouter.ai/api/v1/embeddings', {
+        method: 'POST', headers: { [OPENROUTER_PRIVACY_HEADER]: 'wrong' }, body: validBody,
+      }],
+      ['non-string body', 'https://openrouter.ai/api/v1/embeddings', {
+        method: 'POST', headers: validHeaders, body: new Uint8Array([1, 2, 3]) as any,
+      }],
+      ['malformed body', 'https://openrouter.ai/api/v1/embeddings', {
+        method: 'POST', headers: validHeaders, body: '{',
+      }],
+      ['provider shape', 'https://openrouter.ai/api/v1/embeddings', {
+        method: 'POST', headers: validHeaders, body: JSON.stringify({ provider: [] }),
+      }],
+      ['origin mismatch', 'https://example.test/api/v1/embeddings', {
+        method: 'POST', headers: validHeaders, body: validBody,
+      }],
+      ['path mismatch', 'https://openrouter.ai/v1/embeddings', {
+        method: 'POST', headers: validHeaders, body: validBody,
+      }],
+    ];
+
+    try {
+      for (const [name, input, init] of faults) {
+        calls = 0;
+        await expect(
+          runWithOpenRouterPrivacyStrict(() => openrouterCompatFetch(input, init)),
+          name,
+        ).rejects.toThrow(/OpenRouter strict privacy refusal/);
+        expect(calls, name).toBe(0);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('18. exact opt-in env opens ALS and wires the private marker; non-exact values do not', async () => {
+    const observed: Headers[] = [];
+    try {
+      for (const strictValue of ['1', 'true']) {
+        configureGateway({
+          embedding_model: 'openrouter:google/gemini-embedding-001',
+          embedding_dimensions: 2,
+          env: {
+            OPENROUTER_API_KEY: 'fake-openrouter-key',
+            [OPENROUTER_PRIVACY_STRICT_ENV]: strictValue,
+          },
+        });
+        __setEmbedTransportForTests((async (args: any) => {
+          observed.push(new Headers(args.headers));
+          return { embeddings: args.values.map(() => [0.1, 0.2]) };
+        }) as any);
+        await embed(['fixture']);
+      }
+
+      expect(openrouterPrivacyStrictRequested({ [OPENROUTER_PRIVACY_STRICT_ENV]: '1' })).toBe(true);
+      expect(openrouterPrivacyStrictRequested({ [OPENROUTER_PRIVACY_STRICT_ENV]: 'true' })).toBe(false);
+      expect(observed[0].get(OPENROUTER_PRIVACY_HEADER)).toBe(OPENROUTER_PRIVACY_HEADER_VALUE);
+      expect(observed[1].has(OPENROUTER_PRIVACY_HEADER)).toBe(false);
+    } finally {
+      __setEmbedTransportForTests(null);
+      resetGateway();
+    }
+  });
+
+  test('19. strict REQUIRED wire gate compares the rewritten native JSON body', async () => {
+    const originalFetch = globalThis.fetch;
+    let nativeFetches = 0;
+    const starts: RequiredMigrationNativeAttemptSummary[] = [];
+    const requiredPair: RequiredMigrationEmbedPair = Object.freeze({
+      text: 'wire-fixture',
+      identity: Object.freeze({
+        source_id: 'required-source',
+        page_id: 7,
+        slug: 'required/page',
+        chunk_source: 'compiled_truth',
+        chunk_index: 0,
+        stored_text_sha256: 'a'.repeat(64),
+      }),
+    });
+    globalThis.fetch = (async () => {
+      nativeFetches++;
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const send = () => runWithRequiredMigrationWireAttemptPairs(
+      [requiredPair],
+      'google/gemini-embedding-001',
+      REQUIRED_MIGRATION_PRIVACY_POLICY,
+      () => runWithOpenRouterPrivacyStrict(() => openrouterCompatFetch(
+        'https://openrouter.ai/api/v1/embeddings',
+        {
+          method: 'POST',
+          headers: { [OPENROUTER_PRIVACY_HEADER]: OPENROUTER_PRIVACY_HEADER_VALUE },
+          body: JSON.stringify({
+            model: 'google/gemini-embedding-001',
+            input: ['wire-fixture'],
+            provider: { zdr: false, data_collection: 'allow' },
+          }),
+        },
+      )),
+    );
+
+    try {
+      await runWithRequiredMigrationWireAttemptHook({
+        attemptStarted(summary) { starts.push(summary); },
+        attemptFinished() {},
+      }, send);
+      expect(nativeFetches).toBe(1);
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toMatchObject({
+        sourceId: 'required-source',
+        itemCount: 1,
+        utf16CharCount: 'wire-fixture'.length,
+        utf8ByteCount: Buffer.byteLength('wire-fixture'),
+        model: 'google/gemini-embedding-001',
+        privacyPolicy: REQUIRED_MIGRATION_PRIVACY_POLICY,
+      });
+
+      await expect(send()).rejects.toThrow(/context fault/);
+      expect(nativeFetches).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('20. REQUIRED mode blocks OpenRouter embedding without privacy scope or wire context', async () => {
+    const originalFetch = globalThis.fetch;
+    let nativeFetches = 0;
+    const request: RequestInit = {
+      method: 'POST',
+      headers: { [OPENROUTER_PRIVACY_HEADER]: OPENROUTER_PRIVACY_HEADER_VALUE },
+      body: JSON.stringify({ model: 'google/gemini-embedding-001', input: ['fixture'] }),
+    };
+
+    await withEnv({ [REQUIRED_MIGRATION_EMBED_ALLOWLIST_MODE_ENV]: 'REQUIRED' }, async () => {
+      globalThis.fetch = (async () => {
+        nativeFetches++;
+        return new Response('{}', { status: 200 });
+      }) as unknown as typeof fetch;
+      try {
+        await expect(openrouterCompatFetch('https://openrouter.ai/api/v1/embeddings', request))
+          .rejects.toThrow(/context fault/);
+        await expect(runWithOpenRouterPrivacyStrict(() =>
+          openrouterCompatFetch('https://openrouter.ai/api/v1/embeddings', request),
+        )).rejects.toThrow(/context fault/);
+        expect(nativeFetches).toBe(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 });

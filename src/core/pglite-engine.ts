@@ -119,6 +119,7 @@ import type { PgliteCodeEdgesDeps } from './pglite-engine/code-edges.ts';
 import * as salienceImpl from './pglite-engine/salience.ts';
 import type { PgliteSalienceDeps } from './pglite-engine/salience.ts';
 import { searchKeywordCJK } from './pglite-engine/cjk-search.ts';
+import { executeRequiredMigrationVectorCasOnEngine, type RequiredMigrationVectorCasInput } from './required-migration-vector-cas.ts';
 
 /**
  * #4284 — opt-in out-of-band watchdog for a PGLite disconnect with a live
@@ -2969,6 +2970,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   // Chunks
+  async updateRequiredMigrationChunkEmbeddings(input: RequiredMigrationVectorCasInput): Promise<number> { return executeRequiredMigrationVectorCasOnEngine(this, input); }
   async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: ResolvedColumn } & BatchOpts): Promise<void> {
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal, () => this._upsertChunksOnce(slug, chunks, opts), chunks.length);
   }
