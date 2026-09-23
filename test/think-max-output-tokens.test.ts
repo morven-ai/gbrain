@@ -23,9 +23,10 @@ describe('maxOutputTokensFor — thinking-default headroom', () => {
     expect(maxOutputTokensFor('anthropic/claude-sonnet-5')).toBe(16000); // slash form
   });
 
-  test('OpenAI reasoning models (gpt-5 family, o-series) get 16000', () => {
+  test('OpenAI reasoning models (gpt-5/6 families, o-series) get 16000', () => {
     expect(maxOutputTokensFor('openai:gpt-5')).toBe(16000);
     expect(maxOutputTokensFor('openai:gpt-5.2')).toBe(16000);
+    expect(maxOutputTokensFor('openai:gpt-6-sol')).toBe(16000);
     expect(maxOutputTokensFor('openai:gpt-5.5')).toBe(16000);
     expect(maxOutputTokensFor('openai:gpt-5-mini')).toBe(16000);
     expect(maxOutputTokensFor('openai:o1')).toBe(16000);

@@ -62,8 +62,8 @@ export interface ResolveModelOpts {
  *  cause `resolveRecipe()` to throw "unknown provider" and the queue rejects
  *  the submit. */
 export const DEFAULT_ALIASES: Record<string, string> = {
-  opus:   'anthropic:claude-opus-4-7',
-  sonnet: 'anthropic:claude-sonnet-4-6',
+  opus:   'anthropic:claude-opus-5-5',
+  sonnet: 'anthropic:claude-sonnet-5',
   haiku:  'anthropic:claude-haiku-4-5-20251001',
   // `gemini` repointed (#2507): `gemini-3-pro` only ever existed as a preview
   // id (`gemini-3-pro-preview`) and was shut down — it was never chat-listed
@@ -76,23 +76,23 @@ export const DEFAULT_ALIASES: Record<string, string> = {
   // flagship, recipe-ranked static floor) — this entry keeps the alias
   // enumerable but the value here is only the documentation floor; a pinned
   // id would 404 within months (the previous 'openai:gpt-5' already did).
-  gpt:    'openai:gpt-5.6',
+  gpt:    'openai:gpt-6-astra',
 };
 
 /**
  * Default model for each tier. Used as the hardcoded fallback when no
  * `models.tier.<tier>` config + no `models.default` is set. Subagent gets
  * Sonnet (Anthropic Messages API tool-loop shape required); reasoning gets
- * Sonnet (default workhorse); deep gets Opus 4.7 (expensive reasoning);
+ * Sonnet (default workhorse); deep gets Opus 5.5 (expensive reasoning);
  * utility gets Haiku (fast classification).
  *
  * Users override via `gbrain config set models.tier.<tier> <model>`.
  */
 export const TIER_DEFAULTS: Record<ModelTier, string> = {
   utility:   'anthropic:claude-haiku-4-5-20251001',
-  reasoning: 'anthropic:claude-sonnet-4-6',
-  deep:      'anthropic:claude-opus-4-7',
-  subagent:  'anthropic:claude-sonnet-4-6',
+  reasoning: 'anthropic:claude-sonnet-5',
+  deep:      'anthropic:claude-opus-5-5',
+  subagent:  'anthropic:claude-sonnet-5',
 };
 
 /**

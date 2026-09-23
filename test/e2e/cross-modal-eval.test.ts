@@ -45,7 +45,7 @@ afterEach(() => {
 
 function makeChatStub(scoresBySlot: Record<string, number[]>) {
   let callIdx = 0;
-  const order = ['openai:gpt-5.2', 'anthropic:claude-opus-4-7', 'deepseek:deepseek-v4-pro'];
+  const order = ['openai:gpt-5.2', 'anthropic:claude-opus-5-5', 'deepseek:deepseek-v4-pro'];
   return mock(async (opts: { model?: string }) => {
     const model = opts.model ?? '';
     callIdx++;
@@ -118,7 +118,7 @@ describe('gbrain eval cross-modal — runner verdict contract', () => {
   test('PASS: 3 happy responses, all dims >=7', async () => {
     const chatStub = makeChatStub({
       'openai:gpt-5.2': [9, 8],
-      'anthropic:claude-opus-4-7': [8, 7],
+      'anthropic:claude-opus-5-5': [8, 7],
       'deepseek:deepseek-v4-pro': [8, 8],
     });
     mock.module('../../src/core/ai/gateway.ts', () => ({
@@ -149,7 +149,7 @@ describe('gbrain eval cross-modal — runner verdict contract', () => {
   test('FAIL: one dim mean below 7', async () => {
     const chatStub = makeChatStub({
       'openai:gpt-5.2': [9, 6],
-      'anthropic:claude-opus-4-7': [8, 6],
+      'anthropic:claude-opus-5-5': [8, 6],
       'deepseek:deepseek-v4-pro': [8, 6],
     });
     mock.module('../../src/core/ai/gateway.ts', () => ({
@@ -174,7 +174,7 @@ describe('gbrain eval cross-modal — runner verdict contract', () => {
   test('FAIL: min-score floor caught when one model scores <5 (Q2)', async () => {
     const chatStub = makeChatStub({
       'openai:gpt-5.2': [9, 8],
-      'anthropic:claude-opus-4-7': [8, 8],
+      'anthropic:claude-opus-5-5': [8, 8],
       'deepseek:deepseek-v4-pro': [4, 8], // goal=4 trips the floor
     });
     mock.module('../../src/core/ai/gateway.ts', () => ({

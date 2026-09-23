@@ -224,14 +224,22 @@ describe('chat touchpoint — model resolver + aliases (Codex F-OV-5)', () => {
     expect(() => assertTouchpoint(getRecipe('groq')!, 'chat', 'some-future-model')).not.toThrow();
     expect(() => assertTouchpoint(getRecipe('ollama')!, 'chat', 'locally-installed-model')).not.toThrow();
   });
+
+  test('GPT-6 models are listed on OpenAI chat and expansion', () => {
+    const r = getRecipe('openai')!;
+    for (const id of ['gpt-6-sol', 'gpt-6-luna', 'gpt-6-astra']) {
+      expect(r.touchpoints.chat!.models).toContain(id);
+    }
+    expect(r.touchpoints.expansion!.models).toContain('gpt-6-luna');
+  });
 });
 
 describe('chat touchpoint — gateway config plumbing', () => {
   beforeEach(() => resetGateway());
 
-  test('default chat_model is anthropic:claude-sonnet-4-6', () => {
+  test('default chat_model is anthropic:claude-sonnet-5', () => {
     configureGateway({ env: {} });
-    expect(getChatModel()).toBe('anthropic:claude-sonnet-4-6');
+    expect(getChatModel()).toBe('anthropic:claude-sonnet-5');
   });
 
   test('explicit chat_model overrides the default', () => {

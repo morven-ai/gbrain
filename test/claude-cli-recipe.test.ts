@@ -92,6 +92,7 @@ describe('claude-cli recipe registration', () => {
     expect(recipe!.touchpoints.chat!.models).toContain('claude-fable-5');
     expect(recipe!.touchpoints.chat!.models).toContain('claude-fable-5-1');
     expect(recipe!.touchpoints.chat!.models).toContain('claude-opus-5');
+    expect(recipe!.touchpoints.chat!.models).toContain('claude-opus-5-5');
     expect(recipe!.touchpoints.chat!.models).toContain('claude-opus-4-8');
     expect(recipe!.touchpoints.chat!.models).toContain('claude-sonnet-5');
     expect(recipe!.touchpoints.embedding).toBeUndefined();
@@ -103,6 +104,7 @@ describe('claude-cli recipe registration', () => {
     expect(recipe!.touchpoints.expansion).toBeDefined();
     expect(recipe!.touchpoints.expansion!.models).toContain('claude-haiku-4-5-20251001');
     expect(recipe!.touchpoints.expansion!.models).toContain('claude-sonnet-5');
+    expect(recipe!.touchpoints.expansion!.models).toContain('claude-opus-5-5');
     // #4794 added claude-fable-5-1 to chat; expansion must carry it too (wave review drift).
     expect(recipe!.touchpoints.expansion!.models).toContain('claude-fable-5-1');
     // Subprocess cold start needs the same headroom the chat touchpoint takes;
@@ -113,7 +115,8 @@ describe('claude-cli recipe registration', () => {
   test('recipe aliases map short names to canonical model ids', async () => {
     const { getRecipe } = await import('../src/core/ai/recipes/index.ts');
     const recipe = getRecipe('claude-cli');
-    expect(recipe!.aliases!['sonnet']).toBe('claude-sonnet-4-6');
+    expect(recipe!.aliases!['sonnet']).toBe('claude-sonnet-5');
+    expect(recipe!.aliases!['opus']).toBe('claude-opus-5-5');
     expect(recipe!.aliases!['haiku']).toBe('claude-haiku-4-5-20251001');
   });
 });

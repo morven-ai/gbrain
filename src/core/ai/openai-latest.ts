@@ -3,8 +3,8 @@
  * models from the account itself.
  *
  * Why this exists: any hardcoded OpenAI model id goes stale in months (the
- * repo pinned gpt-5.2 in April 2026; by August the current family was 5.6
- * with a DIFFERENT tier-naming scheme — sol/terra/luna instead of mini/nano —
+ * repo pinned gpt-5.2 in April 2026; model family tiers and suffixes can change
+ * between generations — GPT-5.6 used sol/terra/luna, GPT-6 uses astra/sol/luna —
  * so even hardcoded filters rot, not just pins). The account's own
  * `GET /v1/models` is ground truth for what this key can use.
  *
@@ -36,8 +36,8 @@
  *
  * Tier mapping mirrors the Anthropic ladder in TIER_DEFAULTS:
  *   utility → cheapest class (luna | nano | mini), reasoning/subagent → mid
- *   class (terra, else the flagship), deep → top class (sol | pro, else the
- *   bare family alias).
+ *   class (terra for GPT-5.6, sol for GPT-6), deep → top class (sol for GPT-5.6,
+ *   astra for GPT-6, else the bare family alias).
  */
 
 import { readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
@@ -94,10 +94,14 @@ function cachePath(): string {
 
 /* ── id grammar + ranking (pure; exported for tests) ─────────────────────── */
 
-const TOP_SUFFIXES = ['sol', 'pro'] as const;
-const MID_SUFFIXES = ['terra'] as const;
+const LEGACY_TOP_SUFFIXES = ['sol', 'pro'] as const;
+const LEGACY_MID_SUFFIXES = ['terra'] as const;
+const GPT6_TOP_SUFFIXES = ['astra'] as const;
+const GPT6_MID_SUFFIXES = ['sol'] as const;
 const CHEAP_SUFFIXES = ['luna', 'nano', 'mini'] as const;
-const KNOWN_SUFFIXES = new Set<string>([...TOP_SUFFIXES, ...MID_SUFFIXES, ...CHEAP_SUFFIXES]);
+const KNOWN_SUFFIXES = new Set<string>([
+  ...LEGACY_TOP_SUFFIXES, ...LEGACY_MID_SUFFIXES, ...GPT6_TOP_SUFFIXES, ...GPT6_MID_SUFFIXES, ...CHEAP_SUFFIXES,
+]);
 
 export interface ParsedOpenAIChatId {
   id: string;
@@ -149,6 +153,9 @@ export function rankOpenAIChatModels(
   const newestFamily = eligible.reduce((best, p) =>
     familyCmp(p.family, best) > 0 ? p.family : best, eligible[0].family);
   const members = eligible.filter((p) => familyCmp(p.family, newestFamily) === 0);
+  const isGpt6 = newestFamily[0] === 6;
+  const topSuffixes = isGpt6 ? GPT6_TOP_SUFFIXES : LEGACY_TOP_SUFFIXES;
+  const midSuffixes = isGpt6 ? GPT6_MID_SUFFIXES : LEGACY_MID_SUFFIXES;
   // Only surface an unpriced id when its family is strictly NEWER than the
   // newest priced family — accounts often still list obsolete unpriced ids
   // (legacy families), and warning about those tells a release engineer to
@@ -162,10 +169,10 @@ export function rankOpenAIChatModels(
   // still gets usable tiers rather than tiers:null and a static fallback the
   // account may not serve. Since `members` is non-empty, every tier resolves.
   // Top: named top tier, else the bare family alias, else the best remaining.
-  const top = pickBySuffix(members, TOP_SUFFIXES) ?? pickBySuffix(members, [''])
-    ?? pickBySuffix(members, MID_SUFFIXES) ?? pickBySuffix(members, CHEAP_SUFFIXES);
+  const top = pickBySuffix(members, topSuffixes) ?? pickBySuffix(members, [''])
+    ?? pickBySuffix(members, midSuffixes) ?? pickBySuffix(members, CHEAP_SUFFIXES);
   // Mid: named mid tier, else the bare alias, else top.
-  const mid = pickBySuffix(members, MID_SUFFIXES) ?? pickBySuffix(members, ['']) ?? top;
+  const mid = pickBySuffix(members, midSuffixes) ?? pickBySuffix(members, ['']) ?? top;
   // Cheap: named cheap tier, else mid.
   const cheap = pickBySuffix(members, CHEAP_SUFFIXES) ?? mid;
   if (!top || !mid || !cheap) return { tiers: null, newestUnpriced };

@@ -42,6 +42,23 @@ describe('CANONICAL_PRICING — table integrity', () => {
     expect(CANONICAL_PRICING['anthropic:claude-opus-5']).toMatchObject({ input: 5.0, output: 25.0 });
   });
 
+  test('Opus 5.5 pricing includes its 0.05x cache read override', () => {
+    expect(CANONICAL_PRICING['anthropic:claude-opus-5-5']).toEqual({
+      input: 4.0,
+      output: 20.0,
+      cache_read: 0.2,
+      cache_write: 5.0,
+      cache_write_1h: 8.0,
+    });
+  });
+
+  test('GPT-6 family prices are present alongside legacy GPT entries', () => {
+    expect(CANONICAL_PRICING['openai:gpt-6-sol']).toEqual({ input: 2.0, output: 10.0 });
+    expect(CANONICAL_PRICING['openai:gpt-6-luna']).toEqual({ input: 0.1, output: 0.5 });
+    expect(CANONICAL_PRICING['openai:gpt-6-astra']).toEqual({ input: 10.0, output: 50.0 });
+    expect(CANONICAL_PRICING['openai:gpt-5.6-luna']).toBeDefined();
+  });
+
   test('Opus 4.8 present at $5/$25 (closes gbrain#1819)', () => {
     expect(CANONICAL_PRICING['anthropic:claude-opus-4-8']).toMatchObject({ input: 5.0, output: 25.0 });
   });
@@ -112,6 +129,10 @@ describe('CANONICAL_PRICING — table integrity', () => {
       if (p.cache_write !== undefined) {
         expect(Number.isFinite(p.cache_write)).toBe(true);
         expect(p.cache_write).toBeGreaterThan(p.input);
+      }
+      if (p.cache_write_1h !== undefined) {
+        expect(Number.isFinite(p.cache_write_1h)).toBe(true);
+        expect(p.cache_write_1h).toBeGreaterThan(p.input);
       }
       // Non-Anthropic rows deliberately carry NO cache fields until their
       // provider's cache pricing is verified — consumers fall back to the
@@ -196,15 +217,15 @@ describe('DRIFT GUARD — derived views stay equal to canonical (re-hardcode tri
     }
   });
 
-  test('openai recipe expansion cost equals canonical gpt-5.6-luna input price', async () => {
+  test('openai recipe expansion cost equals canonical gpt-6-luna input price', async () => {
     // The recipe's expansion touchpoint hardcodes a per-1M cost with a
-    // "gpt-5.6-luna baseline" comment; the canonical table is the single
+    // "gpt-6-luna baseline" comment; the canonical table is the single
     // home for that number. Keyed pin (luna is the declared baseline) so a
     // price refresh that touches only one of the two homes fails here.
     const { openai } = await import('../src/core/ai/recipes/openai.ts');
-    const canonical = CANONICAL_PRICING['openai:gpt-5.6-luna'];
+    const canonical = CANONICAL_PRICING['openai:gpt-6-luna'];
     expect(canonical).toBeDefined();
-    expect(openai.touchpoints?.expansion?.models?.[0]).toBe('gpt-5.6-luna');
+    expect(openai.touchpoints?.expansion?.models?.[0]).toBe('gpt-6-luna');
     expect(openai.touchpoints?.expansion?.cost_per_1m_tokens_usd).toBe(canonical.input);
   });
 

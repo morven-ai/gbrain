@@ -228,13 +228,13 @@ const THINKING_DEFAULT_MAX_OUTPUT_TOKENS = 16000;
 // OpenAI reasoning models spend output budget on internal reasoning tokens
 // the same way — reasoning tokens are billed as output and count against
 // `max_tokens` — so they get the same headroom. Deliberately scoped to the
-// gpt-5 family and the numbered o-series only; anything else (gpt-4o, the
+// gpt-5/6 families and the numbered o-series only; anything else (gpt-4o, the
 // non-reasoning `*-chat` snapshots like gpt-5-chat-latest, other providers'
 // reasoning models routed through their own recipes) keeps the conservative
 // 4000 default.
-const OPENAI_REASONING_MODEL_RE = /^openai[:/](?:gpt-5|o[0-9]+)(?:[.-]|$)/i;
+const OPENAI_REASONING_MODEL_RE = /^openai[:/](?:gpt-(?:5|6)|o[0-9]+)(?:[.-]|$)/i;
 const OPENAI_CHAT_SNAPSHOT_RE = /-chat(?:-|$)/i; // gpt-5-chat-latest, gpt-5.2-chat-latest
-// #4375: the default deep tier (anthropic:claude-opus-4-7) routinely needs
+// #4375: the deep tier (now anthropic:claude-opus-5-5) routinely needs
 // more than 4000 tokens for the synthesis JSON envelope; at 4000 the envelope
 // truncates mid-stream. Anthropic-scoped only (same spelling variants as
 // THINKING_BY_DEFAULT_MODEL_RE), so provider hard caps (DeepSeek 8192,

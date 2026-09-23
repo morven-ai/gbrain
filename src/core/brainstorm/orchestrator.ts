@@ -518,7 +518,7 @@ export function resolveBrainstormChatModel(
   config: { chat_model?: string },
   modelOverride?: string,
 ): string {
-  return modelOverride ?? config.chat_model ?? 'anthropic:claude-sonnet-4-6';
+  return modelOverride ?? config.chat_model ?? 'anthropic:claude-sonnet-5';
 }
 
 /**

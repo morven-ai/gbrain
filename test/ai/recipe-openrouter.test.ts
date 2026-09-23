@@ -91,6 +91,7 @@ describe('recipe: openrouter', () => {
   test('3b. expansion reuses routed chat models and accepts arbitrary provider/model IDs', () => {
     const r = getRecipe('openrouter')!;
     expect(r.touchpoints.expansion).toBeDefined();
+    expect(r.touchpoints.expansion!.models).toContain('openai/gpt-6-luna');
     expect(r.touchpoints.expansion!.models.length).toBeGreaterThanOrEqual(3);
     expect(() =>
       assertTouchpoint(r, 'expansion', 'some/provider-model'),
@@ -108,6 +109,12 @@ describe('recipe: openrouter', () => {
     const r = getRecipe('openrouter')!;
     const models = r.touchpoints.chat!.models;
     expect(models.length).toBeGreaterThanOrEqual(6);
+    expect(models).toContain('openai/gpt-6-sol');
+    expect(models).toContain('openai/gpt-6-luna');
+    expect(models).toContain('openai/gpt-6-astra');
+    expect(models).toContain('anthropic/claude-opus-5.5');
+    expect(models).toContain('anthropic/claude-sonnet-5');
+    expect(models).toContain('openai/gpt-5.5'); // historical catalogue entry remains
     for (const m of models) {
       expect(m, `chat model "${m}" must match provider/model shape`).toMatch(
         MODEL_SHAPE,

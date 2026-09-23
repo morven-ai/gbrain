@@ -57,6 +57,10 @@ export interface ModelPricing {
    * absent (under-estimate for writes; documented, not silent).
    */
   cache_write?: number;
+  /** Optional published Anthropic one-hour-TTL cache-write rate. Usage
+   * aggregation currently reports cache writes without separating TTL, so
+   * estimates continue to use `cache_write` (the default 5m rate). */
+  cache_write_1h?: number;
 }
 
 /** Anthropic prompt-cache multipliers (verified 2026-08 against published
@@ -80,6 +84,8 @@ function anthro(input: number, output: number, cacheReadMult = ANTHROPIC_CACHE_R
 export const ANTHROPIC_CACHE_READ_MULT_OVERRIDES: Record<string, number> = {
   // Fable 5.1 bills cache hits at 0.025x base input ($0.25/MTok on $10).
   'anthropic:claude-fable-5-1': 0.025,
+  // Opus 5.5 bills cache hits at 0.05x base input ($0.20/MTok on $4).
+  'anthropic:claude-opus-5-5': 0.05,
 };
 
 /**
@@ -98,8 +104,14 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // Fable 5.1: same $10/$50 sticker as Fable 5, but cache hits bill 0.025x
   // ($0.25/MTok) instead of 0.1x — the only rate that changed.
   'anthropic:claude-fable-5-1':           anthro(10.00, 50.00, ANTHROPIC_CACHE_READ_MULT_OVERRIDES['anthropic:claude-fable-5-1']),
-  // Opus 4.x/5: $5 in / $25 out. Opus 5 (new generation) shares the same
-  // per-token rate as 4.8 (released 2026-05-28) — closes gbrain#1819.
+  // Opus 5.5: $4/$20, cache reads at 0.05x input; default 5m writes are
+  // $5/MTok (1h writes at $8 are not separately modeled).
+  'anthropic:claude-opus-5-5': {
+    ...anthro(4.00, 20.00, ANTHROPIC_CACHE_READ_MULT_OVERRIDES['anthropic:claude-opus-5-5']),
+    cache_write_1h: 8.00,
+  },
+  // Opus 4.x/5.0: $5 in / $25 out. Opus 5 (released 2026-05-28) shares the
+  // per-token rate as 4.8 — closes gbrain#1819. Opus 5.5 has its own row above.
   'anthropic:claude-opus-5':              anthro( 5.00, 25.00),
   'anthropic:claude-opus-4-8':            anthro( 5.00, 25.00),
   'anthropic:claude-opus-4-7':            anthro( 5.00, 25.00),
@@ -136,6 +148,10 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   'openai:gpt-5.6-sol':                   { input:  5.00, output: 30.00 },
   'openai:gpt-5.6-terra':                 { input:  2.50, output: 15.00 },
   'openai:gpt-5.6-luna':                  { input:  0.20, output:  1.20 },
+  // GPT-6 rates (USD/MTok); older rows above remain for history/configs.
+  'openai:gpt-6-sol':                     { input:  2.00, output: 10.00 },
+  'openai:gpt-6-luna':                    { input:  0.10, output:  0.50 },
+  'openai:gpt-6-astra':                   { input: 10.00, output: 50.00 },
 
   // ── Google ─────────────────────────────────────────────────────────────
   // `gemini-1.5-pro` was retired by Google (#3510); kept so historical

@@ -35,15 +35,17 @@ describe('Anthropic recipe model IDs', () => {
     expect(anthropic.aliases?.['claude-sonnet-4-6-20250929']).toBe('claude-sonnet-4-6');
   });
 
-  it('current-generation models are listed for chat (Fable 5 / Opus 5 / Opus 4.8 / Sonnet 5)', () => {
+  it('current-generation models are listed for chat (Fable 5 / Opus 5.5 / Opus 5 / Sonnet 5)', () => {
     // Regression guard for the tier-config incident: a brain with
     // `models.tier.deep = anthropic:claude-opus-4-8` had think/auto_think
     // silently degrade because the recipe list stopped at Opus 4.7.
     const chatModels = anthropic.touchpoints?.chat?.models ?? [];
     expect(chatModels).toContain('claude-fable-5');
+    expect(chatModels).toContain('claude-opus-5-5');
     expect(chatModels).toContain('claude-opus-5');
     expect(chatModels).toContain('claude-opus-4-8');
     expect(chatModels).toContain('claude-sonnet-5');
+    expect(chatModels).toContain('claude-opus-5'); // retained for historical/configured models
   });
 
   it('Fable 5.1 is chat-only and carries its 1M context window', () => {
@@ -54,6 +56,11 @@ describe('Anthropic recipe model IDs', () => {
 
   it('Sonnet 5 is listed for expansion', () => {
     expect(anthropic.touchpoints?.expansion?.models ?? []).toContain('claude-sonnet-5');
+  });
+
+  it('Opus 5.5 is listed for expansion and carries its 1M context window', () => {
+    expect(anthropic.touchpoints?.expansion?.models ?? []).toContain('claude-opus-5-5');
+    expect(anthropic.touchpoints?.chat?.model_context_tokens?.['claude-opus-5-5']).toBe(1_000_000);
   });
 
   it('all listed models follow naming conventions', () => {

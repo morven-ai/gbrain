@@ -253,19 +253,25 @@ export const openrouter: Recipe = {
     expansion: {
       models: [
         'anthropic/claude-haiku-4.5',
+        'openai/gpt-6-luna',
         'google/gemini-3-flash-preview',
         'deepseek/deepseek-chat',
       ],
-      price_last_verified: '2026-05-20',
+      price_last_verified: '2026-09-23',
     },
     chat: {
-      // Curated entry points (verified against OR's catalog 2026-05-20). The
+      // Curated entry points (verified against OR's catalog 2026-09-23). The
       // openai-compat tier does NOT enforce this list at runtime — users can
       // pass any model ID OR routes. Refresh quarterly; see TODOS.md.
       models: [
+        'openai/gpt-6-sol',
+        'openai/gpt-6-luna',
+        'openai/gpt-6-astra',
         'openai/gpt-5.2',
         'openai/gpt-5.2-chat',
         'openai/gpt-5.5',
+        'anthropic/claude-opus-5.5',
+        'anthropic/claude-sonnet-5',
         'anthropic/claude-haiku-4.5',
         'anthropic/claude-sonnet-4.6',
         'anthropic/claude-opus-4.7',
@@ -283,7 +289,7 @@ export const openrouter: Recipe = {
       // No max_context_tokens: catalog spans 128K to 1M+; a single recipe-wide
       // value is either unsafe for smaller models or wasteful for larger ones.
       // Let upstream errors surface per-model.
-      price_last_verified: '2026-05-20',
+      price_last_verified: '2026-09-23',
     },
     reranker: {
       models: [

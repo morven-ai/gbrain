@@ -47,7 +47,7 @@ export const TOKEN_BUDGET_PER_IDEA = 150;
 export const TOKEN_BUDGET_ENVELOPE = 500;
 /** Pre-v0.41.20.0 hard-coded floor; preserved so 1-idea batches still get headroom. */
 export const LEGACY_MIN_MAX_TOKENS = 4000;
-/** Fallback cap when the resolved model isn't in ANTHROPIC_OUTPUT_CAPS. Matches Opus 4.7's cap. */
+/** Fallback cap when the resolved model isn't in ANTHROPIC_OUTPUT_CAPS. Matches Opus 5.5's cap. */
 export const MAX_OUTPUT_TOKENS_CEIL = 32_000;
 
 /**
@@ -64,6 +64,7 @@ export const ANTHROPIC_OUTPUT_CAPS: Record<string, number> = {
   'claude-fable-5': 64_000,
   'claude-fable-5-1': 64_000,
   'claude-opus-5': 32_000,
+  'claude-opus-5-5': 32_000,
   'claude-sonnet-5': 64_000,
   'claude-opus-4-8': 32_000,
   'claude-opus-4-7': 32_000,

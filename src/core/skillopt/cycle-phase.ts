@@ -115,9 +115,9 @@ export async function runPhaseSkillopt(opts: SkilloptPhaseOpts): Promise<Skillop
   }
 
   // Resolve models once. Tiers default to deep/subagent/reasoning.
-  const optimizerModel = await resolveModel(engine, { tier: 'deep', fallback: 'anthropic:claude-opus-4-7' });
-  const targetModel = await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-4-6' });
-  const judgeModel = await resolveModel(engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-4-6' });
+  const optimizerModel = await resolveModel(engine, { tier: 'deep', fallback: 'anthropic:claude-opus-5-5' });
+  const targetModel = await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-5' });
+  const judgeModel = await resolveModel(engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-5' });
 
   // Run per-skill. Each invocation gets its own per-skill cap; we track
   // cumulative cost across the cycle and bail when brain-wide cap hit.

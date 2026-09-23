@@ -57,6 +57,9 @@ describe('parseOpenAIChatId — conservative grammar', () => {
     expect(parseOpenAIChatId('gpt-5.6-sol')?.suffix).toBe('sol');
     expect(parseOpenAIChatId('gpt-5.6-terra')?.suffix).toBe('terra');
     expect(parseOpenAIChatId('gpt-5.6-luna')?.suffix).toBe('luna');
+    expect(parseOpenAIChatId('gpt-6-astra')?.suffix).toBe('astra');
+    expect(parseOpenAIChatId('gpt-6-sol')?.suffix).toBe('sol');
+    expect(parseOpenAIChatId('gpt-6-luna')?.suffix).toBe('luna');
     expect(parseOpenAIChatId('gpt-4o-mini')).toBeNull(); // 4o is not \d.\d grammar
     expect(parseOpenAIChatId('gpt-5-mini')?.suffix).toBe('mini');
   });
@@ -100,6 +103,16 @@ describe('rankOpenAIChatModels — newest PRICED family, tier ladder', () => {
       reasoning: 'openai:gpt-5.2',
       deep: 'openai:gpt-5.2',
       subagent: 'openai:gpt-5.2',
+    });
+  });
+
+  test('GPT-6 uses astra/sol/luna tier order without changing the legacy ladder', () => {
+    const { tiers } = rankOpenAIChatModels(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna'], allPriced);
+    expect(tiers).toEqual({
+      utility: 'openai:gpt-6-luna',
+      reasoning: 'openai:gpt-6-sol',
+      deep: 'openai:gpt-6-astra',
+      subagent: 'openai:gpt-6-sol',
     });
   });
 
@@ -166,7 +179,7 @@ describe('refresh + cache + resolution overlay', () => {
     expect(resolveTierDefault('deep', { OPENAI_API_KEY: 'sk-test' })).toBe('openai:gpt-5.6-sol');
     // Anthropic-first is untouched by the overlay.
     expect(resolveTierDefault('reasoning', { ANTHROPIC_API_KEY: 'sk-ant', OPENAI_API_KEY: 'sk-test' }))
-      .toBe('anthropic:claude-sonnet-4-6');
+      .toBe('anthropic:claude-sonnet-5');
   });
 
   test('no cache → static recipe-ranked fallback', () => {

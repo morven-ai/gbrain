@@ -372,8 +372,8 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
           status: 'warn',
           message:
             `${source} is "${resolved}" but that provider/model lacks native tool calling. ` +
-            `The subagent loop cannot run on this model — runtime will fall back to claude-sonnet-4-6. ` +
-            `Fix: \`gbrain config set ${source} <provider>:<model-with-tools>\` (e.g. anthropic:claude-sonnet-4-6 or openai:gpt-5.2).`,
+            `The subagent loop cannot run on this model — runtime will fall back to claude-sonnet-5. ` +
+            `Fix: \`gbrain config set ${source} <provider>:<model-with-tools>\` (e.g. anthropic:claude-sonnet-5 or openai:gpt-6-sol).`,
         };
       }
       if (verdict === 'unknown') {
@@ -383,7 +383,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
           message:
             `${source} is "${resolved}" which references an unknown provider. ` +
             `Use a recipe-declared provider. ` +
-            `Fix: \`gbrain config set ${source} anthropic:claude-sonnet-4-6\` or pick another known provider.`,
+            `Fix: \`gbrain config set ${source} anthropic:claude-sonnet-5\` or pick another known provider.`,
         };
       }
       if (verdict === 'unusable:no_subagent_loop') {
@@ -396,9 +396,9 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
             `The subagent loop cannot run on this model — ` +
             (source === 'models.subagent'
               ? `jobs are refused at dispatch. `
-              : `runtime will fall back to claude-sonnet-4-6. `) +
+              : `runtime will fall back to claude-sonnet-5. `) +
             `Fix: \`gbrain config set ${source} <provider>:<model>\` with a provider whose recipe declares ` +
-            `supports_subagent_loop: true (e.g. anthropic:claude-sonnet-4-6).`,
+            `supports_subagent_loop: true (e.g. anthropic:claude-sonnet-5).`,
         };
       }
       if (verdict === 'degraded:no_caching') {
@@ -409,7 +409,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
             `${source} is "${resolved}" — provider does not support prompt caching. ` +
             `The subagent loop runs hot (cost scales linearly with conversation length). ` +
             `For lower cost on long loops, use an Anthropic model: ` +
-            `\`gbrain config set models.tier.subagent anthropic:claude-sonnet-4-6\`.`,
+            `\`gbrain config set models.tier.subagent anthropic:claude-sonnet-5\`.`,
         };
       }
       return null;
@@ -466,7 +466,7 @@ export async function checkSubagentCapability(engine: BrainEngine): Promise<Chec
       status: 'ok',
       message: resolvedModel && resolvedSource
         ? `Subagent model resolves via ${resolvedSource} to "${resolvedModel}" with full tool-loop capability`
-        : `Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability`,
+        : `Subagent tier resolves to default (claude-sonnet-5) — full tool-loop capability`,
     };
   } catch (e) {
     return {

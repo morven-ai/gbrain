@@ -17,14 +17,15 @@ export const anthropic: Recipe = {
   touchpoints: {
     // No embedding model available.
     expansion: {
-      models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-sonnet-4-6'],
+      models: ['claude-haiku-4-5-20251001', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-opus-5-5'],
       cost_per_1m_tokens_usd: 0.25,
-      price_last_verified: '2026-05-10',
+      price_last_verified: '2026-09-23',
     },
     chat: {
       models: [
         'claude-fable-5',
         'claude-fable-5-1',
+        'claude-opus-5-5',
         'claude-opus-5',
         'claude-opus-4-8',
         'claude-opus-4-7',
@@ -39,6 +40,7 @@ export const anthropic: Recipe = {
         'claude-fable-5': 1_000_000,
         'claude-fable-5-1': 1_000_000,
         'claude-opus-5': 1_000_000,
+        'claude-opus-5-5': 1_000_000,
         'claude-sonnet-5': 1_000_000,
         'claude-opus-4-8': 1_000_000,
         'claude-opus-4-7': 1_000_000,
@@ -47,7 +49,7 @@ export const anthropic: Recipe = {
       max_context_tokens: 200000,
       cost_per_1m_input_usd: 3.0, // sonnet-class baseline
       cost_per_1m_output_usd: 15.0,
-      price_last_verified: '2026-05-10',
+      price_last_verified: '2026-09-23',
     },
   },
   // Friendly aliases. Starting with Claude 4.6, Anthropic API IDs are dateless

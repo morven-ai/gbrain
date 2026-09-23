@@ -225,7 +225,7 @@ export interface GradeTakesOpts extends BasePhaseOpts {
   /**
    * E2 ensemble judges. When useEnsemble=true and the single-model verdict
    * is borderline, all three judges are called in parallel via Promise.allSettled.
-   * Defaults to [openai:gpt-5.2, anthropic:claude-sonnet-4-6, google:gemini-2.5-flash]
+   * Defaults to [openai:gpt-5.2, anthropic:claude-sonnet-5, google:gemini-2.5-flash]
    * via defaultJudge with model-string overrides. Tests inject deterministic
    * judges.
    */
@@ -522,7 +522,7 @@ class GradeTakesPhase extends BaseCyclePhase {
     const judgeModelFull = opts.model ?? getChatModel();
     // Bare tail for the stored judge_model_id + evidence signature
     // (historical convention). Stock installs are unchanged: getChatModel()
-    // defaults to 'anthropic:claude-sonnet-4-6', whose tail equals the old
+    // defaults to 'anthropic:claude-sonnet-5', whose tail is the current
     // hardcoded value — zero verdict-cache invalidation. A genuinely
     // different chat_model invalidates, which is correct: the judge really
     // changed.

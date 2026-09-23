@@ -100,7 +100,7 @@ export function parseBrainstormArgs(args: string[]): BrainstormCliArgs {
     } else if (arg === '--judge-model') {
       const v = args[++i];
       if (!v) {
-        out.error = `--judge-model requires a model id (e.g. anthropic:claude-sonnet-4-6)`;
+        out.error = `--judge-model requires a model id (e.g. anthropic:claude-sonnet-5)`;
         return out;
       }
       out.judgeModel = v;

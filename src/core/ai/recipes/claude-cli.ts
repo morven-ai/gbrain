@@ -55,6 +55,7 @@ export const claudeCli: Recipe = {
         'claude-haiku-4-5-20251001',
         'claude-fable-5',
         'claude-fable-5-1',
+        'claude-opus-5-5',
         'claude-opus-5',
         'claude-opus-4-8',
         'claude-opus-4-7',
@@ -64,7 +65,7 @@ export const claudeCli: Recipe = {
       // Nominal — the subscription bears the actual bill. Mirrors the chat
       // touchpoint's rationale below.
       cost_per_1m_tokens_usd: 3.0,
-      price_last_verified: '2026-06-17',
+      price_last_verified: '2026-09-23',
       // Same subprocess cold start as chat: `claude -p` routinely takes 5-6s
       // before emitting a token. The probe's flat 5000ms default would
       // false-fail on every run.
@@ -74,6 +75,7 @@ export const claudeCli: Recipe = {
       models: [
         'claude-fable-5',
         'claude-fable-5-1',
+        'claude-opus-5-5',
         'claude-opus-5',
         'claude-opus-4-8',
         'claude-opus-4-7',
@@ -104,7 +106,7 @@ export const claudeCli: Recipe = {
       // can treat the numbers as nominal.
       cost_per_1m_input_usd: 3.0,
       cost_per_1m_output_usd: 15.0,
-      price_last_verified: '2026-06-17',
+      price_last_verified: '2026-09-23',
       // The gateway dispatches via a `claude -p (print mode)` subprocess (CLI cold
       // start + user-level CLAUDE.md load), which routinely takes 5-6s even
       // when the CLI and subscription are perfectly healthy. `gbrain models
@@ -122,9 +124,9 @@ export const claudeCli: Recipe = {
   aliases: {
     'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
     'claude-sonnet-4-6-20250929': 'claude-sonnet-4-6',
-    'sonnet': 'claude-sonnet-4-6',
+    'sonnet': 'claude-sonnet-5',
     'haiku': 'claude-haiku-4-5-20251001',
-    'opus': 'claude-opus-4-7',
+    'opus': 'claude-opus-5-5',
   },
   setup_hint:
     'Install Claude Code (`claude` CLI) and run `claude` once to log in. ' +

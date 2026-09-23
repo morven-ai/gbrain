@@ -164,7 +164,7 @@ export interface GBrainConfig {
   expansion_model?: string;
   /**
    * Default chat model for `gateway.chat()` callers (v0.27+).
-   * Default: "anthropic:claude-sonnet-4-6" (dateless per Anthropic's v0.31.12+ model-ID format).
+   * Default: "anthropic:claude-sonnet-5".
    */
   chat_model?: string;
   /**

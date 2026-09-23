@@ -174,9 +174,9 @@ const run_skillopt: Operation = {
     if (!skillsDir) {
       throw new OperationError('config_error', 'run_skillopt: skills directory not found');
     }
-    const optimizerModel = await resolveModel(ctx.engine, { tier: 'deep', fallback: 'anthropic:claude-opus-4-7' });
-    const targetModel = await resolveModel(ctx.engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-4-6' });
-    const judgeModel = await resolveModel(ctx.engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-4-6' });
+    const optimizerModel = await resolveModel(ctx.engine, { tier: 'deep', fallback: 'anthropic:claude-opus-5-5' });
+    const targetModel = await resolveModel(ctx.engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-5' });
+    const judgeModel = await resolveModel(ctx.engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-5' });
     const skillName = p.skill_name as string;
     const benchmarkPath = (p.benchmark_path as string) ??
       `${skillsDir}/${skillName}/skillopt-benchmark.jsonl`;

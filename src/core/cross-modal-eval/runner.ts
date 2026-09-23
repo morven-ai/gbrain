@@ -50,7 +50,7 @@ export const DEFAULT_SLOTS: SlotConfig[] = [
   // chat" on every install and the 3-slot panel could never reach its
   // 2-model quorum without a Google key (verdict: permanently inconclusive).
   { id: 'A', model: 'openai:gpt-5.2' },
-  { id: 'B', model: 'anthropic:claude-opus-4-7' },
+  { id: 'B', model: 'anthropic:claude-opus-5-5' },
   // gemini-1.5-pro was retired by Google (#3510), so slot C failed even with
   // a Google key configured. deepseek:deepseek-v4-pro preserves the
   // three-distinct-provider contract with a model registered in both the

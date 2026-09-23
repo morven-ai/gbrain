@@ -87,11 +87,11 @@ export async function runSkillOptCommand(engine: BrainEngine | null, args: strin
 
   // Resolve models via the tier system.
   const optimizerModel = parsed.optimizerModel
-    ?? await resolveModel(engine, { tier: 'deep', fallback: 'anthropic:claude-opus-4-7' });
+    ?? await resolveModel(engine, { tier: 'deep', fallback: 'anthropic:claude-opus-5-5' });
   const targetModel = parsed.targetModel
-    ?? await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-4-6' });
+    ?? await resolveModel(engine, { tier: 'subagent', fallback: 'anthropic:claude-sonnet-5' });
   const judgeModel = parsed.judgeModel
-    ?? await resolveModel(engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-4-6' });
+    ?? await resolveModel(engine, { tier: 'reasoning', fallback: 'anthropic:claude-sonnet-5' });
 
   // ── Bootstrap mode (short-circuits before the optimization loop) ────────
   if (parsed.bootstrapFromRouting) {
