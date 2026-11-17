@@ -54,6 +54,7 @@ import { splitProviderModelId, normalizeModelId } from '../../model-id.ts';
 import { anthropicClientOptions } from '../../ai/anthropic-key.ts';
 import { withEngineScope } from '../../engine-scope.ts';
 import { redactProviderKeys } from '../../ai/key-redact.ts';
+import { dropAnthropicReplayReasoning } from '../../ai/anthropic-replay.ts';
 import { buildSystemPrompt, DEFAULT_SUBAGENT_SYSTEM } from '../system-prompt.ts';
 import { toolLoop as gatewayToolLoop, isThinkingModel, THINKING_MODEL_MAX_OUTPUT_TOKENS } from '../../ai/gateway.ts';
 import type { ChatToolDef, ChatMessage, ChatBlock, ChatResult, ToolHandler } from '../../ai/gateway.ts';
@@ -612,7 +613,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     const priorToolByUseId = new Map(priorTools.map(t => [`${t.message_idx}:${t.tool_use_id}`, t]));
 
     // Rebuild the Anthropic messages array from persisted rows.
-    const anthroMessages: Anthropic.MessageParam[] = priorMessages.length > 0
+    let anthroMessages: Anthropic.MessageParam[] = priorMessages.length > 0
       ? priorMessages.map(m => ({ role: m.role, content: m.content_blocks as any }))
       : [{ role: 'user', content: data.prompt }];
 
@@ -746,6 +747,15 @@ export function makeSubagentHandler(deps: SubagentDeps) {
         anthroMessages.push({ role: 'user', content: synthesizedResults as any });
       }
     }
+
+    // terminal·소비 턴·다음 번호는 원본 priorMessages로 확정했다.
+    // 예전 system/tools를 입증할 기록이 없어 balanced 재개도 사고를 제외한다.
+    // 전송 복사본만 정리하고, 이후 동일 실행의 append-only 사고는 그대로 둔다.
+    anthroMessages = anthroMessages.flatMap(message => {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) return [message];
+      const content = message.content.filter(block => block.type !== 'thinking' && block.type !== 'redacted_thinking');
+      return content.length > 0 ? [{ ...message, content }] : [];
+    });
 
     // ── Main loop ───────────────────────────────────────────
     let stopReason: SubagentStopReason = 'error';
@@ -1264,6 +1274,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
       signal: ctx.signal,
       jobDeadlineAtMs: ctx.deadlineAtMs,
     });
+  const consumedAssistantTurns = priorChatMessages.filter(m => m.role === 'assistant').length;
 
   // Terminal early-return (#1151 parity): the prior run already reached
   // end_turn. Non-Anthropic providers reject a trailing assistant "prefill",
@@ -1272,7 +1283,7 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     const lastAssistant = [...priorMessages].reverse().find(m => m.role === 'assistant');
     return {
       result: terminalText,
-      turns_count: priorChatMessages.filter(m => m.role === 'assistant').length,
+      turns_count: consumedAssistantTurns,
       stop_reason: replayTerminalStopReason(lastAssistant?.tokens_out, maxOutputTokens, terminalText),
       tokens: priorTokens,
     };
@@ -1385,9 +1396,12 @@ async function runSubagentViaGateway(args: GatewayRunArgs): Promise<SubagentResu
     // test/e2e/subagent-gateway-path.test.ts ("happy path 1-turn" + "write-
     // ordering invariant").
     replayState: {
-      priorMessages: priorChatMessages,
+      // terminal·소비 턴·다음 번호는 정리 전 이력으로 확정한다. 이전 system/tools의
+      // 동일성을 입증할 기록이 없어 balanced·모델 교차 재개도 보수적으로 정리한다.
+      // 저장 이력만 대상이며 새 loop의 append-only 사고는 유지한다.
+      priorMessages: dropAnthropicReplayReasoning(priorChatMessages),
       priorTools: priorToolsByStableKey,
-      nextTurnIdx: priorChatMessages.filter(m => m.role === 'assistant').length,
+      nextTurnIdx: consumedAssistantTurns,
       nextMessageIdx,
     },
     onAssistantTurn: async (turnIdx, messageIdx, blocks, usage, modelStr) => {

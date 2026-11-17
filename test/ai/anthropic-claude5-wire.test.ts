@@ -69,7 +69,7 @@ describe('Claude 5-generation models on the native Anthropic lane', () => {
     });
   }
 
-  for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5']) {
+  for (const model of ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-2']) {
     test(`${model}: expand() uses native structured output, never a forced tool_choice`, async () => {
       configure(model);
       const out = await expand('alpha');
@@ -77,6 +77,35 @@ describe('Claude 5-generation models on the native Anthropic lane', () => {
       expect(bodies[0].tool_choice).toBeUndefined();
       expect(bodies[0].output_config?.format?.type).toBe('json_schema');
       expect(out).toEqual(expect.arrayContaining(['alpha one', 'alpha two']));
+      console.log(JSON.stringify({ structuredResponse: out, body: bodies[0] }));
     });
   }
+});
+
+// 복구로 바뀐 prefix 뒤의 서명만 제외하는 최종 wire 계약. 기존 시험은 사고 이력을 보내지 않았다.
+// 가짜 서명은 직렬화 확인용이며 provider의 암호검증을 증명하지 않는다.
+test('복구 전 signed reasoning은 유지하고 복구 뒤 signed/redacted만 wire에서 제외', async () => {
+  configure('claude-fable-5-2');
+  const result = await chat({ messages: [
+    { role: 'user', content: 'start' },
+    { role: 'assistant', content: [
+      { type: 'reasoning', text: 'prefix', providerMetadata: { anthropic: { signature: 'fixture-before' } } },
+      { type: 'tool-call', toolCallId: 'first', toolName: 'search', input: {} },
+    ] },
+    { role: 'assistant', content: [
+      { type: 'reasoning', text: 'stale', providerMetadata: { anthropic: { signature: 'fixture-after' } } },
+      { type: 'reasoning', text: '', providerMetadata: { anthropic: { redactedData: 'fixture-redacted' } } },
+      { type: 'text', text: 'keep text' },
+      { type: 'tool-call', toolCallId: 'second', toolName: 'search', input: {} },
+    ] },
+    { role: 'user', content: [{ type: 'tool-result', toolCallId: 'second', toolName: 'search', output: 'stored' }] },
+  ], maxTokens: 64 });
+  expect(result.text).toBe('ok');
+  const blocks = bodies[0].messages.flatMap((m: any) => m.content);
+  expect(blocks.filter((b: any) => b.type === 'thinking')).toEqual([{ type: 'thinking', thinking: 'prefix', signature: 'fixture-before' }]);
+  expect(blocks.some((b: any) => b.type === 'redacted_thinking')).toBe(false);
+  expect(blocks.filter((b: any) => b.type === 'tool_use').map((b: any) => b.id)).toEqual(['first', 'second']);
+  expect(blocks.filter((b: any) => b.type === 'tool_result')).toHaveLength(2);
+  expect(blocks).toContainEqual({ type: 'text', text: 'keep text' });
+  console.log(JSON.stringify({ response: result.text, body: bodies[0] }));
 });

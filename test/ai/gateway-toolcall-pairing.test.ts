@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'bun:test';
 import { generateText } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
-import { repairToolPairing, toModelMessages, type ChatMessage } from '../../src/core/ai/gateway.ts';
+import { repairToolPairing, toModelMessages, type ChatMessage, type ChatBlock } from '../../src/core/ai/gateway.ts';
 
 function mockModel(): MockLanguageModelV3 {
   return new MockLanguageModelV3({
@@ -96,5 +96,45 @@ describe('real AI SDK v6 validation', () => {
       { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'brain_get_page', output: { type: 'json', value: { updated_at: new Date('2026-06-26T06:56:59.000Z') } } }] },
     ];
     await expect(generateText({ model: mockModel() as any, messages: rawDateMessages as any })).rejects.toThrow();
+  });
+});
+
+// 복구 위치·서명·빈 assistant·비변이 계약을 보호한다. 기존 pairing 시험에는 reasoning이 없다.
+// 순수 함수 원본 대조만 사용하며 provider 암호검증 주장은 하지 않는다.
+describe('repairToolPairing의 Anthropic prefix 무효화 경계', () => {
+  const signed: ChatBlock = { type: 'reasoning', text: 'signed', providerMetadata: { anthropic: { signature: 'fixture' } } };
+  const redacted: ChatBlock = { type: 'reasoning', text: '', providerMetadata: { anthropic: { redactedData: 'opaque' } } };
+  const other: ChatBlock = { type: 'reasoning', text: 'other', providerMetadata: { google: { thoughtSignature: 'keep' } } };
+  const plain: ChatBlock = { type: 'reasoning', text: 'plain' };
+  const call = (id: string): ChatBlock => ({ type: 'tool-call', toolCallId: id, toolName: 'search', input: {} });
+  const answer = (id: string): ChatBlock => ({ type: 'tool-result', toolCallId: id, toolName: 'search', output: id });
+  for (const partial of [false, true]) {
+    it(`${partial ? '부분 병합' : '중간 삽입'} 이후만 제거하고 복수 복구·빈 assistant도 처리`, () => {
+      const msgs: ChatMessage[] = [
+        { role: 'assistant', content: [signed, call('a'), ...(partial ? [call('b')] : [])] },
+        ...(partial ? [{ role: 'user' as const, content: [answer('a')] }] : []),
+        { role: 'assistant', content: [signed, redacted] },
+        { role: 'assistant', content: [signed, other, plain, { type: 'text', text: 'keep' }, call('c')] },
+        { role: 'assistant', content: [redacted, { type: 'text', text: 'later' }] },
+      ];
+      const original = structuredClone(msgs);
+      const out = repairToolPairing(msgs);
+      expect(msgs).toEqual(original);
+      expect(out[0]).toBe(msgs[0]);
+      expect(out).toHaveLength(5);
+      expect(out[2].content).toEqual([other, plain, { type: 'text', text: 'keep' }, call('c')]);
+      expect(out[4].content).toEqual([{ type: 'text', text: 'later' }]);
+      expect(repairToolPairing(out)).toEqual(out);
+      expect((out[1].content as ChatBlock[]).filter(b => b.type === 'tool-result')).toHaveLength(partial ? 2 : 1);
+    });
+  }
+  it('balanced 입력과 마지막 결과 append는 과거 signed/redacted reasoning을 보존', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'assistant', content: [signed, redacted, call('a')] },
+      { role: 'user', content: [answer('a')] },
+      { role: 'assistant', content: [signed, redacted, call('b')] },
+    ];
+    expect(repairToolPairing(msgs).slice(0, 3)).toEqual(msgs);
+    expect(repairToolPairing(msgs.slice(0, 2))).toEqual(msgs.slice(0, 2));
   });
 });

@@ -36,6 +36,7 @@ import { z } from 'zod';
 import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
 export { splitByTokenBudget, capBatchItems, NO_BATCH_CAP_SUB_BATCH_ITEMS } from './embed-batch-plan.ts';
 import { BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
+import { dropAnthropicReplayReasoning } from './anthropic-replay.ts';
 import { failedCallUsage, recordOnTracker } from './budget-record.ts';
 import { estimateChatInputTokens } from './chat-input-estimate.ts';
 import { chatWithFallback, normalizeChatFallbackChain } from './chat-fallback.ts';
@@ -2618,19 +2619,10 @@ export async function expand(query: string): Promise<string[]> {
         result = await guardedExpansion(modelLabel, _generateObjectTransport, {
           model,
           schema: ExpansionSchema,
-          // Name the schema. On the native-anthropic path the SDK turns the schema
-          // into a tool, and without a name+description that tool carries no
-          // `description` field. api.anthropic.com tolerates that; an
-          // Anthropic-COMPATIBLE endpoint need not, and at least one (z.ai/GLM)
-          // then ignores `tool_choice: {type:'tool'}` and answers with
-          // markdown-fenced JSON as ordinary text. Measured 3/3 deterministic both
-          // ways against z.ai: with a description, 3/3 tool_use; without it, 3/3
-          // end_turn+text. generateObject then sees no object, `result.object` is
-          // undefined, and expansion degrades to the bare query — on EVERY call,
-          // with no error line, because the catch below only reports AIConfigError.
-          // The two openai-compatible branches already recover via viaText(); this
-          // native branch has no such fallback, so naming the schema is its only
-          // guard.
+          // 지원 모델은 SDK가 output_config.format의 json_schema로 전송한다.
+          // 구형 모델·호환 endpoint의 jsonTool fallback에서는 name/description이
+          // 필요하다. 설명이 없으면 일부 endpoint가 강제 도구 선택을 무시하고
+          // 일반 텍스트로 응답하여 object를 얻지 못하므로 두 필드를 유지한다.
           schemaName: 'query_expansions',
           schemaDescription: 'The rewritten search queries used to retrieve relevant documents.',
           abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
@@ -3068,6 +3060,7 @@ export function toModelMessages(
  */
 export function repairToolPairing(messages: ChatMessage[]): ChatMessage[] {
   const out: ChatMessage[] = [];
+  let reasoningInvalidAfter = Infinity;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     out.push(m);
@@ -3106,8 +3099,11 @@ export function repairToolPairing(messages: ChatMessage[]): ChatMessage[] {
       // No following tool-result message at all — synthesize one.
       out.push({ role: 'user', content: stubs });
     }
+    // 첫 실제 삽입/병합 이전의 서명은 유효하다. tail 결과 append도 과거 prefix를
+    // 바꾸지 않는다. 이후 서명만 제거하며 입력 배열과 블록은 변이시키지 않는다.
+    reasoningInvalidAfter = Math.min(reasoningInvalidAfter, out.length);
   }
-  return out;
+  return dropAnthropicReplayReasoning(out, reasoningInvalidAfter);
 }
 
 export interface ChatResult {

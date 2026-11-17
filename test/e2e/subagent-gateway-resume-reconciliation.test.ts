@@ -334,3 +334,94 @@ describe('gateway resume reconciliation', () => {
     expect(result.stop_reason).toBe('end_turn');
   });
 });
+
+// 승인 회귀: 기존 actual-handler 시험에는 signed-only 중간 턴이나 재구성된
+// system/tools가 없었다. PGLite의 제어 상태와 전송 복사본·남은 예산을 함께 검증한다.
+// balanced crash resume도 예전 system/tools를 입증할 기록이 없어 보수적으로 제거한다.
+describe('gateway 재개의 사고 이력과 제어 상태 분리', () => {
+  const signed: ChatBlock = { type: 'reasoning', text: 'old', providerMetadata: { anthropic: { signature: 'old-signature' } } };
+  const redacted: ChatBlock = { type: 'reasoning', text: '', providerMetadata: { anthropic: { redactedData: 'old-redacted' } } };
+  const other: ChatBlock = { type: 'reasoning', text: 'keep', providerMetadata: { google: { thoughtSignature: 'keep' } } };
+  for (const balanced of [false, true]) {
+    for (const model of ['anthropic:claude-fable-5-2', 'openai:gpt-4o']) {
+      it(`${model}, balanced=${balanced}: 빈 중간 턴 제거 후에도 두 소비 턴·한 호출 예산·번호 유지`, async () => {
+        const { jobId, ctx } = await makeJob('resume', model);
+        ctx.data = { ...ctx.data, max_turns: 3, system: 'rebuilt system' };
+        await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'resume' }]);
+        await seedMessage(jobId, 1, 'assistant', [signed, redacted]);
+        await seedMessage(jobId, 2, 'user', [{ type: 'text', text: 'continue' }]);
+        await seedMessage(jobId, 3, 'assistant', [signed, redacted, other, { type: 'text', text: 'keep text' }, { type: 'tool-call', toolCallId: 'old-call', toolName: 'search', input: {} }]);
+        await seedExec(jobId, 3, 'old-call', 'search', 'complete', { results: ['stored'] }, 0);
+        if (balanced) await seedMessage(jobId, 4, 'user', [{ type: 'tool-result', toolCallId: 'old-call', toolName: 'search', output: { results: ['stored'] } }]);
+        const stored = await engine.executeRaw('SELECT * FROM subagent_messages WHERE job_id=$1 ORDER BY message_idx', [jobId]);
+        let calls = 0;
+        const fresh: ChatBlock = { type: 'reasoning', text: 'fresh', providerMetadata: { anthropic: { signature: 'fresh-signature' } } };
+        __setChatTransportForTests(async opts => {
+          calls++;
+          const replay = structuredClone(opts.messages);
+          expect(replay.filter(m => m.role === 'assistant')).toHaveLength(1);
+          expect((replay.find(m => m.role === 'assistant')!.content as ChatBlock[])).toEqual([other, { type: 'text', text: 'keep text' }, { type: 'tool-call', toolCallId: 'old-call', toolName: 'search', input: {} }]);
+          expect(opts.system).toContain('rebuilt system');
+          assertBalanced(replay);
+          return { text: '', blocks: [fresh, { type: 'tool-call', toolCallId: 'new-call', toolName: 'search', input: {} }], stopReason: 'tool_calls',
+            usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 }, model, providerId: model.split(':')[0] } satisfies ChatResult;
+        });
+        const executions: string[] = [];
+        const result = await buildHandler(makeTools(executions))(ctx);
+        expect(calls).toBe(1);
+        expect(result.turns_count).toBe(3);
+        expect(result.stop_reason).toBe('max_turns');
+        expect(executions).toEqual(['search']); // 완료된 old-call은 재실행하지 않는다.
+        const after = await engine.executeRaw<any>('SELECT * FROM subagent_messages WHERE job_id=$1 ORDER BY message_idx', [jobId]);
+        for (const row of stored) expect(after.find(m => m.message_idx === (row as any).message_idx)).toEqual(row);
+        expect(after.map(m => [m.message_idx, m.role])).toEqual([[0, 'user'], [1, 'assistant'], [2, 'user'], [3, 'assistant'], [4, 'user'], [5, 'assistant'], [6, 'user']]);
+        expect(JSON.stringify(after.find(m => m.message_idx === 5).content_blocks)).toContain('fresh-signature');
+      });
+    }
+  }
+  for (const reasoning of [signed, redacted]) {
+    it(`tail ${JSON.stringify(reasoning.providerMetadata)}는 terminal 결과와 호출 0회 유지`, async () => {
+      const { jobId, ctx } = await makeJob('terminal', 'anthropic:claude-fable-5-2');
+      await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'terminal' }]);
+      await seedMessage(jobId, 1, 'assistant', [reasoning]);
+      let calls = 0;
+      __setChatTransportForTests(async () => { calls++; throw new Error('terminal must not call'); });
+      const result = await buildHandler(makeTools([]))(ctx);
+      expect(calls).toBe(0);
+      expect(result).toMatchObject({ result: '', turns_count: 1, stop_reason: 'error' });
+    });
+  }
+  it('실제 handler→gateway→설치 SDK→HTTP: 재개 사고 제거 후 새 append-only 사고 보존', async () => {
+    __setChatTransportForTests(null);
+    const bodies: any[] = [];
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(req) {
+      const body = await req.json(); bodies.push(body);
+      const response = { id: 'msg_fixture', type: 'message', role: 'assistant', model: body.model,
+        content: bodies.length === 1 ? [
+          { type: 'thinking', thinking: 'new thought', signature: 'new-signature' },
+          { type: 'redacted_thinking', data: 'new-redacted' },
+          { type: 'tool_use', id: 'fresh-call', name: 'search', input: {} },
+        ] : [{ type: 'text', text: 'done' }],
+        stop_reason: bodies.length === 1 ? 'tool_use' : 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
+      console.log(JSON.stringify({ body, response }));
+      return Response.json(response);
+    } });
+    try {
+      configureGateway({ chat_model: 'anthropic:claude-fable-5-2', env: { ANTHROPIC_API_KEY: 'fixture', ANTHROPIC_BASE_URL: `http://127.0.0.1:${server.port}/v1` } });
+      const { jobId, ctx } = await makeJob('resume wire', 'anthropic:claude-fable-5-2');
+      ctx.data = { ...ctx.data, system: 'current system', max_turns: 3 };
+      await seedMessage(jobId, 0, 'user', [{ type: 'text', text: 'resume wire' }]);
+      await seedMessage(jobId, 1, 'assistant', [signed, redacted, { type: 'tool-call', toolCallId: 'old-call', toolName: 'search', input: {} }]);
+      await seedExec(jobId, 1, 'old-call', 'search', 'complete', { results: ['stored'] }, 0);
+      const executions: string[] = [];
+      const result = await buildHandler(makeTools(executions))(ctx);
+      expect(result).toMatchObject({ result: 'done', turns_count: 2, stop_reason: 'end_turn' });
+      expect(executions).toEqual(['search']);
+      expect(bodies).toHaveLength(2);
+      expect(JSON.stringify(bodies[0])).not.toContain('old-signature');
+      expect(JSON.stringify(bodies[0])).not.toContain('old-redacted');
+      const fresh = bodies[1].messages.flatMap((m: any) => m.content).filter((b: any) => ['thinking', 'redacted_thinking'].includes(b.type));
+      expect(fresh).toEqual([{ type: 'thinking', thinking: 'new thought', signature: 'new-signature' }, { type: 'redacted_thinking', data: 'new-redacted' }]);
+    } finally { server.stop(true); }
+  });
+});

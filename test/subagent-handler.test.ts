@@ -1557,3 +1557,62 @@ describe('legacy loop: an accepted tool write that is still pending (#5474)', ()
     expect(dispatches).toBe(1);
   });
 });
+
+// 승인 회귀: v1 raw 사고를 가진 crash 이력은 기존 replay 시험에 없었다.
+// actual handler와 PGLite로 전송 복사본만 정리하고 소비 턴·DB·완료 도구를 보존하는지 본다.
+describe('direct Anthropic v1 재개 사고 정리', () => {
+  const thinking = [{ type: 'thinking', thinking: 'old', signature: 'old-signature' }, { type: 'redacted_thinking', data: 'old-redacted' }];
+  async function seed(ctx: MinionJobContext, idx: number, role: string, blocks: unknown[]) {
+    await engine.executeRaw(`INSERT INTO subagent_messages (job_id, message_idx, role, content_blocks) VALUES ($1,$2,$3,$4::text::jsonb)`, [ctx.id, idx, role, JSON.stringify(blocks)]);
+  }
+  test('중간 빈 assistant 제거·완료 도구 복구 후에도 소비 턴과 남은 호출 예산 유지', async () => {
+    const ctx = await makeCtx({ prompt: 'resume', max_turns: 3 });
+    await seed(ctx, 0, 'user', [{ type: 'text', text: 'resume' }]);
+    await seed(ctx, 1, 'assistant', thinking);
+    await seed(ctx, 2, 'user', [{ type: 'text', text: 'continue' }]);
+    await seed(ctx, 3, 'assistant', [...thinking, { type: 'text', text: 'keep' }, { type: 'tool_use', id: 'old-call', name: 'echo', input: {} }]);
+    await engine.executeRaw(`INSERT INTO subagent_tool_executions (job_id,message_idx,tool_use_id,tool_name,input,status,output) VALUES ($1,3,'old-call','echo','{}'::jsonb,'complete','{"stored":true}'::jsonb)`, [ctx.id]);
+    const before = await engine.executeRaw('SELECT * FROM subagent_messages WHERE job_id=$1 ORDER BY message_idx', [ctx.id]);
+    const fresh = [{ type: 'thinking', thinking: 'new', signature: 'new-signature' }, { type: 'tool_use', id: 'new-call', name: 'echo', input: {} }];
+    const client = new FakeMessagesClient([{ content: fresh as any, stop_reason: 'tool_use' }]);
+    let executed = 0;
+    const tool = { ...makeEchoTool(), execute: async () => { executed++; return { ok: true }; } };
+    const result = await makeSubagentHandler({ engine, client, toolRegistry: [tool] })(ctx);
+    expect(client.calls).toHaveLength(1);
+    expect(result).toMatchObject({ turns_count: 3, stop_reason: 'max_turns' });
+    expect(executed).toBe(1);
+    const sent = client.calls[0].messages;
+    expect(JSON.stringify(sent)).not.toContain('old-signature');
+    expect(JSON.stringify(sent)).not.toContain('old-redacted');
+    expect(sent.some(m => m.role === 'assistant' && Array.isArray(m.content) && m.content.length === 0)).toBe(false);
+    expect(JSON.stringify(sent)).toContain('new-signature'); // 동일 실행 append는 유지.
+    expect(JSON.stringify(sent)).toContain('old-call');
+    expect(JSON.stringify(sent)).toContain('stored');
+    const after = await engine.executeRaw<any>('SELECT * FROM subagent_messages WHERE job_id=$1 ORDER BY message_idx', [ctx.id]);
+    expect(after.slice(0, before.length)).toEqual(before);
+    expect(after.map(m => m.message_idx)).toEqual([0,1,2,3,4,5,6]);
+  });
+  test('정상 연속 실행에서 새 thinking/redacted를 다음 요청에 보존', async () => {
+    const client = new FakeMessagesClient([
+      { content: [...thinking, { type: 'tool_use', id: 'call', name: 'echo', input: {} }] as any, stop_reason: 'tool_use' },
+      { content: [{ type: 'text', text: 'done' }] as any },
+    ]);
+    const ctx = await makeCtx({ prompt: 'fresh' });
+    const result = await makeSubagentHandler({ engine, client, toolRegistry: [makeEchoTool()] })(ctx);
+    expect(result.result).toBe('done');
+    expect(client.calls).toHaveLength(2);
+    expect(JSON.stringify(client.calls[1].messages)).toContain('old-signature');
+    expect(JSON.stringify(client.calls[1].messages)).toContain('old-redacted');
+  });
+  for (const block of thinking) {
+    test(`tail ${block.type}는 제거 전 terminal 판정과 호출 0회 유지`, async () => {
+      const ctx = await makeCtx({ prompt: 'terminal' });
+      await seed(ctx, 0, 'user', [{ type: 'text', text: 'terminal' }]);
+      await seed(ctx, 1, 'assistant', [block]);
+      const client = new FakeMessagesClient([]);
+      const result = await makeSubagentHandler({ engine, client, toolRegistry: [] })(ctx);
+      expect(client.calls).toHaveLength(0);
+      expect(result).toMatchObject({ result: '', turns_count: 1, stop_reason: 'error' });
+    });
+  }
+});

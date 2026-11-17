@@ -19,6 +19,12 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { chat, configureGateway, resetGateway, THINKING_MODEL_MAX_OUTPUT_TOKENS } from '../../src/core/ai/gateway.ts';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BudgetTracker } from '../../src/core/budget/budget-tracker.ts';
+import { thinkingOffOutputCap, withBudgetTracker } from '../../src/core/ai/gateway.ts';
+import { thinkingOffControl } from '../../src/core/ai/thinking-off.ts';
 import { applyThinkingOff } from '../../src/core/ai/thinking-off.ts';
 
 let server: ReturnType<typeof Bun.serve>;
@@ -315,5 +321,48 @@ describe('judge preflight estimates price the cap chat() sends (W9F item 5)', ()
     expect(cm.estimateCost([{ id: 'X', model: 'openai:gpt-5' }], 1, 4000).notes)
       .toEqual([`(openai:gpt-5): cannot turn thinking off; its calls send and are priced at a ${THINKING_MODEL_MAX_OUTPUT_TOKENS}-token output cap`]);
     expect(cm.estimateCost(cm.DEFAULT_SLOTS, 1, 4000).notes).toEqual([]);
+  });
+});
+
+// 승인 회귀: 기존 표는 SDK가 disabled를 거부하는 모델과 예약 상한을 다루지 않았다.
+// 실제 gateway→설치 SDK→로컬 HTTP를 사용하며 별도 production seam은 추가하지 않는다.
+describe('Claude 5 사고 유지 모델의 off 요청 상한', () => {
+  for (const id of ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5']) {
+    for (const requested of [64, 40000]) {
+      test(`${id}: 요청 ${requested}의 preflight·예약·wire 상한 일치`, async () => {
+        const model = `anthropic:${id}`;
+        configure(model, { anthropic: { thinking: { type: 'enabled', budgetTokens: 4096 }, cacheControl: { type: 'ephemeral', ttl: '1h' } } });
+        const auditPath = join(mkdtempSync(join(tmpdir(), 'claude-cap-')), 'budget.jsonl');
+        const tracker = new BudgetTracker({ label: 'claude-cap', auditPath });
+        const reservations: Parameters<BudgetTracker['reserve']>[0][] = [];
+        const reserve = tracker.reserve.bind(tracker);
+        tracker.reserve = estimate => { reservations.push(estimate); return reserve(estimate); };
+        const result = await withBudgetTracker(tracker, () => judgeCall(model, { maxTokens: requested, cacheSystem: true }));
+        const expected = Math.max(requested, 32000);
+        expect(result.text).toBe('{"ok":true}');
+        expect(thinkingOffControl(model)?.disables).toBe(false);
+        expect(thinkingOffOutputCap(model, requested)).toBe(expected);
+        expect(bodies[0].max_tokens).toBe(expected);
+        const reservation = reservations[0];
+        expect(reservation.maxOutputTokens).toBe(expected);
+        const audit = readFileSync(auditPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        expect(audit.some(row => row.event === 'reserve' || row.event === 'reserve_unpriced')).toBe(true);
+        expect(bodies[0].thinking?.type).not.toBe('disabled');
+        expect(JSON.stringify(bodies[0])).not.toContain('budget_tokens');
+        expect(JSON.stringify(bodies[0].system)).toContain('"ttl":"1h"');
+        console.log(JSON.stringify({ model, requested, response: result.text, reservation, body: bodies[0] }));
+      });
+    }
+  }
+  test('family 경계·snapshot·구형 off 상한 및 옵션 형제 보존', () => {
+    for (const id of ['claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2-20261101', 'claude-opus-5-5-20261101', 'claude-sonnet-5-5-20261101']) {
+      expect(thinkingOffOutputCap(`anthropic:${id}`, 64)).toBe(32000);
+    }
+    for (const id of ['claude-opus-5', 'claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-fable-50', 'claude-opus-5-50', 'claude-sonnet-5-50']) {
+      expect(thinkingOffOutputCap(`anthropic:${id}`, 64)).toBe(64);
+    }
+    expect(thinkingOffControl('deepseek:claude-fable-5-2')?.disables).toBe(true);
+    const options = { anthropic: { thinking: { type: 'enabled', budgetTokens: 4096 }, cacheControl: { type: 'ephemeral' }, effort: 'low' }, other: { keep: true } };
+    expect(applyThinkingOff(options, 'anthropic:claude-fable-5-2')).toEqual({ anthropic: { thinking: { type: 'disabled' }, cacheControl: { type: 'ephemeral' }, effort: 'low' }, other: { keep: true } });
   });
 });

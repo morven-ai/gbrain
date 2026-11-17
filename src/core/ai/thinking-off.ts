@@ -13,7 +13,7 @@
  * sends.
  *
  * Routes whose option turns reasoning off keep the requested cap:
- *   - native Anthropic (`anthropic`) and DeepSeek (`deepseek`; thinking is on
+ *   - disabled 지원 native Anthropic (`anthropic`)와 DeepSeek (`deepseek`; thinking is on
  *     by default for v4): `thinking: { type: 'disabled' }`
  *   - OpenRouter-hosted DeepSeek (`openrouter` with a `deepseek/` model): same
  *   - Gemini 2.5 Flash and Flash-Lite: `thinkingConfig: { thinkingBudget: 0 }`
@@ -58,6 +58,8 @@ export interface ThinkingOffControl {
 }
 
 const THINKING_DISABLED: Record<string, unknown> = { thinking: { type: 'disabled' } };
+// 설치 SDK가 disabled를 제거/보정하는 계열만 포함한다. 날짜 snapshot도 포함한다.
+const ANTHROPIC_KEEPS_THINKING_RE = /^claude-(?:fable-5|(?:opus|sonnet)-5-5)(?:-|$)/;
 
 const GEMINI_ID_RE = /^gemini-(\d+(?:\.\d+)?)-(flash-lite|flash|pro)(?:-|$)/;
 const GEMINI_NON_CHAT_RE = /-(?:image|tts|audio|live|transcribe|computer-use)(?:-|$)/;
@@ -113,7 +115,7 @@ export function thinkingOffControl(modelStr: string): ThinkingOffControl | undef
   const { provider, model: rawModel } = splitProviderModelId(modelStr);
   if (!provider) return undefined;
   const model = rawModel.trim().toLowerCase();
-  if (provider === 'anthropic' || provider === 'deepseek') return { set: { namespace: provider, options: THINKING_DISABLED }, disables: true };
+  if (provider === 'anthropic' || provider === 'deepseek') return { set: { namespace: provider, options: THINKING_DISABLED }, disables: provider !== 'anthropic' || !ANTHROPIC_KEEPS_THINKING_RE.test(model) };
   if (provider === 'openrouter') return model.startsWith('deepseek/') ? { set: { namespace: provider, options: THINKING_DISABLED }, disables: true } : undefined;
   if (provider === 'google') return googleControl(model);
   if (provider === 'openai') return openaiControl(model);
